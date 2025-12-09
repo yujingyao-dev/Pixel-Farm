@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pixel Farm AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Simple pixel art font fallback */
+      body {
+        font-family: 'Courier New', Courier, monospace;
+        image-rendering: pixelated;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.32.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1"
+  }
+}
+</script>
+</head>
+  <body class="bg-stone-900 text-stone-100 overflow-hidden select-none">
+    <div id="root"></div>
+  </body>
+</html>
