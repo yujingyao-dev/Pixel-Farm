@@ -48,6 +48,23 @@ export enum ItemType {
   MAGIC_ELIXIR = 'MAGIC_ELIXIR'
 }
 
+export enum MascotType {
+  CHICKEN = 'CHICKEN',
+  COW = 'COW',
+  SHEEP = 'SHEEP',
+  PIG = 'PIG',
+  DOG = 'DOG',
+  OWL = 'OWL'
+}
+
+export interface MascotDef {
+  id: MascotType;
+  name: string;
+  description: string;
+  price: number;
+  icon: string;
+}
+
 export interface ItemDef {
   id: ItemType;
   name: string;
@@ -98,6 +115,8 @@ export interface GameState {
   unlockedItems: ItemType[];
   orders: Order[];
   forestTexture: string | null;
+  ownedMascots: MascotType[];
+  activeMascot: MascotType | null;
 }
 
 export const GRID_SIZE = 12;

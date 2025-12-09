@@ -19,5 +19,7 @@ export const INITIAL_GAME_STATE = {
   lastSaveTime: Date.now(),
   unlockedItems: [ItemType.WHEAT],
   orders: [],
-  forestTexture: null
+  forestTexture: null,
+  ownedMascots: [],
+  activeMascot: null
 };

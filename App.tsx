@@ -1,11 +1,20 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { GameState, ItemType, GRID_SIZE, Plot, Order } from './types';
+import { GameState, ItemType, GRID_SIZE, Plot, Order, MascotType, TOTAL_PLOTS } from './types';
 import { INITIAL_GAME_STATE, LEVEL_XP } from './constants';
 import { ITEMS } from './items';
 import { RECIPES } from './recipes';
-import { initializePlots, calculateOfflineProgress, getLevelFromXp, generateNewOrder } from './services/gameService';
-import { generateForestTexture } from './services/geminiService';
+import { MASCOTS } from './mascots';
+import { 
+  initializePlots, 
+  calculateOfflineProgress, 
+  getLevelFromXp, 
+  generateNewOrder, 
+  getAdjustedGrowthTime,
+  getAdjustedCraftTime,
+  getAdjustedXp,
+  getAdjustedOrderMoney
+} from './services/gameService';
 import { Tooltip } from './components/Tooltip';
 
 // Icons
@@ -19,8 +28,9 @@ export default function App() {
   
   const [selectedTool, setSelectedTool] = useState<ItemType | 'HARVEST' | null>(null);
   const [notifications, setNotifications] = useState<{id: number, text: string}[]>([]);
-  const [activeTab, setActiveTab] = useState<'INVENTORY' | 'CRAFTING' | 'ORDERS' | 'SETTINGS'>('INVENTORY');
+  const [activeTab, setActiveTab] = useState<'INVENTORY' | 'CRAFTING' | 'ORDERS' | 'MASCOTS'>('INVENTORY');
   const [now, setNow] = useState(Date.now());
+  const [isDragging, setIsDragging] = useState(false);
 
   // Game Loop
   useEffect(() => {
@@ -40,13 +50,27 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Global mouse up to stop dragging
+  useEffect(() => {
+    const handleGlobalMouseUp = () => setIsDragging(false);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
+  }, []);
+
   // Notifications helper
   const notify = useCallback((text: string) => {
-    const id = Date.now();
-    setNotifications(prev => [...prev, { id, text }]);
+    const id = Date.now() + Math.random();
+    setNotifications(prev => {
+      // Limit to 5 notifications
+      const newList = [...prev, { id, text }];
+      if (newList.length > 5) {
+        return newList.slice(newList.length - 5);
+      }
+      return newList;
+    });
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
-    }, 3000);
+    }, 5000); // 5 seconds
   }, []);
 
   // Helper to check if a crop can be planted at a specific index
@@ -69,26 +93,40 @@ export default function App() {
   };
 
   // Actions
-  const handlePlotClick = (plotIndex: number) => {
+  const handlePlotInteraction = (plotIndex: number) => {
     const plot = gameState.plots[plotIndex];
     const currentTime = Date.now();
 
     // HANDLE OCCUPIED PLOTS (Redirect to root)
     if (plot.occupiedBy !== null) {
-        handlePlotClick(plot.occupiedBy);
+        // If simply clicking, redirect. If dragging, we might want to ignore sub-plots to prevent double triggers?
+        // Actually, redirecting is fine for harvest, but for planting we shouldn't be here anyway.
+        handlePlotInteraction(plot.occupiedBy);
         return;
     }
 
     // HARVEST
     if (plot.plantedCrop && plot.plantTime) {
+       // Only harvest if tool is harvest or null (click) - simplified: click always inspects/harvests
        const cropDef = ITEMS[plot.plantedCrop];
-       if (cropDef.growthTimeMs && (currentTime - plot.plantTime >= cropDef.growthTimeMs)) {
+       const duration = getAdjustedGrowthTime(plot.plantedCrop, gameState.activeMascot);
+
+       if ((currentTime - plot.plantTime >= duration)) {
          // Harvest successful
-         const xpGain = cropDef.xpReward || 0;
+         const baseXp = cropDef.xpReward || 0;
+         const finalXp = getAdjustedXp(baseXp, gameState.activeMascot);
          
          setGameState(prev => {
             const newInventory = { ...prev.inventory };
-            newInventory[plot.plantedCrop!] = (newInventory[plot.plantedCrop!] || 0) + 1;
+            
+            // Calculate Yield (Cow Buff)
+            let yieldCount = 1;
+            if (prev.activeMascot === MascotType.COW && Math.random() < 0.15) {
+                yieldCount = 2;
+                notify("Lucky Cow! Double Harvest! 🐮");
+            }
+
+            newInventory[plot.plantedCrop!] = (newInventory[plot.plantedCrop!] || 0) + yieldCount;
             
             const newPlots = [...prev.plots];
             
@@ -102,11 +140,13 @@ export default function App() {
                 for (let c = 0; c < w; c++) {
                     if (r === 0 && c === 0) continue; // Skip root
                     const targetIdx = plotIndex + (r * GRID_SIZE) + c;
-                    newPlots[targetIdx] = { ...newPlots[targetIdx], occupiedBy: null, plantedCrop: null };
+                    if (targetIdx < TOTAL_PLOTS) {
+                        newPlots[targetIdx] = { ...newPlots[targetIdx], occupiedBy: null, plantedCrop: null };
+                    }
                 }
             }
             
-            const newXp = prev.xp + xpGain;
+            const newXp = prev.xp + finalXp;
             const newLevel = getLevelFromXp(newXp);
             
             if (newLevel > prev.level) notify(`Level Up! You are now level ${newLevel}`);
@@ -120,10 +160,11 @@ export default function App() {
               unlockedItems: Object.values(ITEMS).filter(i => i.unlockLevel <= newLevel).map(i => i.id)
             };
          });
-         notify(`Harvested ${cropDef.name} (+${xpGain} XP)`);
+         notify(`Harvested ${cropDef.name} (+${finalXp} XP)`);
          return;
        } else {
-         notify("Not ready yet!");
+         // Only notify "Not ready" on explicit click, not drag
+         if (!isDragging) notify("Not ready yet!");
          return;
        }
     }
@@ -137,7 +178,7 @@ export default function App() {
        const h = cropDef.height || 1;
 
        if (!canPlantAt(plotIndex, w, h, gameState.plots)) {
-           notify("Not enough space!");
+           if (!isDragging) notify("Not enough space!");
            return;
        }
 
@@ -145,7 +186,12 @@ export default function App() {
        
        if (gameState.money >= cost) {
          setGameState(prev => {
+           // Double check availability inside state update to prevent race conditions during drag
+           if (prev.money < cost) return prev; 
+           if (!canPlantAt(plotIndex, w, h, prev.plots)) return prev;
+
            const newPlots = [...prev.plots];
+           
            // Set Root
            newPlots[plotIndex] = {
              ...plot,
@@ -171,9 +217,82 @@ export default function App() {
            };
          });
        } else {
-         notify("Not enough money for seeds!");
+         if (!isDragging) notify("Not enough money for seeds!");
        }
     }
+  };
+
+  const handleHarvestAll = () => {
+    let harvestedCount = 0;
+    
+    setGameState(prev => {
+        const newInventory = { ...prev.inventory };
+        const newPlots = [...prev.plots];
+        let currentXp = prev.xp;
+        let earnedXp = 0;
+        const earnedItems: Record<string, number> = {};
+
+        prev.plots.forEach((plot, index) => {
+            // Only verify root plots that have crops
+            if (plot.occupiedBy !== null) return;
+            if (!plot.plantedCrop || !plot.plantTime) return;
+
+            const cropDef = ITEMS[plot.plantedCrop];
+            const duration = getAdjustedGrowthTime(plot.plantedCrop, prev.activeMascot);
+            const isReady = (Date.now() - plot.plantTime) >= duration;
+
+            if (isReady) {
+                harvestedCount++;
+                const cropXp = getAdjustedXp(cropDef.xpReward || 0, prev.activeMascot);
+                currentXp += cropXp;
+                earnedXp += cropXp;
+
+                // Yield Logic
+                let yieldCount = 1;
+                if (prev.activeMascot === MascotType.COW && Math.random() < 0.15) {
+                    yieldCount = 2;
+                }
+                newInventory[plot.plantedCrop!] = (newInventory[plot.plantedCrop!] || 0) + yieldCount;
+                earnedItems[cropDef.name] = (earnedItems[cropDef.name] || 0) + yieldCount;
+
+                // Clear Plot
+                newPlots[index] = { ...plot, plantedCrop: null, plantTime: null, occupiedBy: null };
+                
+                // Clear occupied
+                const w = cropDef.width || 1;
+                const h = cropDef.height || 1;
+                for (let r = 0; r < h; r++) {
+                    for (let c = 0; c < w; c++) {
+                        if (r === 0 && c === 0) continue; 
+                        const targetIdx = index + (r * GRID_SIZE) + c;
+                        if (targetIdx < TOTAL_PLOTS) {
+                            newPlots[targetIdx] = { ...newPlots[targetIdx], occupiedBy: null, plantedCrop: null };
+                        }
+                    }
+                }
+            }
+        });
+
+        if (harvestedCount > 0) {
+            const itemSummary = Object.entries(earnedItems).map(([name, count]) => `${name} x${count}`).join(', ');
+            notify(`Harvest All: ${itemSummary} (+${earnedXp} XP)`);
+        } else {
+            notify("Nothing ready to harvest!");
+            return prev;
+        }
+
+        const finalLevel = getLevelFromXp(currentXp);
+        if (finalLevel > prev.level) notify(`Level Up! You are now level ${finalLevel}`);
+
+        return {
+            ...prev,
+            inventory: newInventory,
+            plots: newPlots,
+            xp: currentXp,
+            level: finalLevel,
+            unlockedItems: Object.values(ITEMS).filter(i => i.unlockLevel <= finalLevel).map(i => i.id)
+        };
+    });
   };
 
   const handleCraft = (recipeId: string) => {
@@ -193,7 +312,8 @@ export default function App() {
         // Add output
         newInv[recipe.output] = (newInv[recipe.output] || 0) + 1;
         
-        const newXp = prev.xp + recipe.xpReward;
+        const xpReward = getAdjustedXp(recipe.xpReward, prev.activeMascot);
+        const newXp = prev.xp + xpReward;
         const newLevel = getLevelFromXp(newXp);
         
         return {
@@ -237,13 +357,16 @@ export default function App() {
            newInv[req.item] -= req.count;
         });
         
-        const newXp = prev.xp + order.rewardXp;
+        const moneyReward = getAdjustedOrderMoney(order.rewardMoney, prev.activeMascot);
+        const xpReward = getAdjustedXp(order.rewardXp, prev.activeMascot);
+
+        const newXp = prev.xp + xpReward;
         const newLevel = getLevelFromXp(newXp);
         if (newLevel > prev.level) notify(`Level Up! Level ${newLevel}`);
 
         return {
           ...prev,
-          money: prev.money + order.rewardMoney,
+          money: prev.money + moneyReward,
           xp: newXp,
           level: newLevel,
           inventory: newInv,
@@ -251,7 +374,7 @@ export default function App() {
           unlockedItems: Object.values(ITEMS).filter(i => i.unlockLevel <= newLevel).map(i => i.id)
         };
       });
-      notify(`Order Complete! +${order.rewardMoney}G +${order.rewardXp}XP`);
+      notify("Order Complete!");
     } else {
       notify("Missing items for order!");
     }
@@ -292,15 +415,27 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const generateForest = async () => {
-    notify("Generating magic forest...");
-    const texture = await generateForestTexture();
-    if (texture) {
-      setGameState(prev => ({ ...prev, forestTexture: texture }));
-      notify("Forest grown!");
+  const buyMascot = (mascotId: MascotType) => {
+    const mascot = MASCOTS[mascotId];
+    if (gameState.money >= mascot.price) {
+        setGameState(prev => ({
+            ...prev,
+            money: prev.money - mascot.price,
+            ownedMascots: [...prev.ownedMascots, mascotId],
+            activeMascot: prev.activeMascot || mascotId // Auto equip if none
+        }));
+        notify(`You adopted the ${mascot.name}!`);
     } else {
-      notify("Failed to grow forest (AI Error)");
+        notify("Not enough money!");
     }
+  };
+
+  const equipMascot = (mascotId: MascotType) => {
+      setGameState(prev => ({
+          ...prev,
+          activeMascot: mascotId
+      }));
+      notify(`Equipped ${MASCOTS[mascotId].name}`);
   };
 
   // --- RENDER HELPERS ---
@@ -323,16 +458,19 @@ export default function App() {
   const renderGrid = () => {
     return (
       <div 
-        className="grid gap-1 bg-stone-800 p-2 rounded border-4 border-stone-700 shadow-2xl relative z-10"
+        className="grid gap-1 bg-stone-800 p-2 rounded border-4 border-stone-700 shadow-2xl relative z-10 select-none"
         style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, minmax(0, 1fr))` }}
+        onMouseLeave={() => setIsDragging(false)}
       >
-        {gameState.plots.map((plot) => {
+        {gameState.plots.map((plot, index) => {
           // If this plot is merely occupied by another crop, render a placeholder (or nothing visible)
           if (plot.occupiedBy !== null) {
               return (
                  <div 
                     key={plot.id} 
                     className="w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 bg-[#5d4037]/50"
+                    onMouseEnter={() => { if (isDragging) handlePlotInteraction(index); }}
+                    onMouseDown={() => { setIsDragging(true); handlePlotInteraction(index); }}
                  />
               );
           }
@@ -345,13 +483,11 @@ export default function App() {
           if (plot.plantedCrop && plot.plantTime) {
              const def = ITEMS[plot.plantedCrop];
              const elapsed = now - plot.plantTime;
-             const duration = def.growthTimeMs || 1000;
+             const duration = getAdjustedGrowthTime(plot.plantedCrop, gameState.activeMascot); // Apply Buff
              progress = Math.min(100, (elapsed / duration) * 100);
              isReady = progress >= 100;
 
              // Multi-tile sizing logic
-             // Tailwind gap-1 is 0.25rem (4px). 
-             // We need to span X cells plus (X-1) gaps.
              const widthMult = def.width || 1;
              const heightMult = def.height || 1;
              
@@ -366,7 +502,7 @@ export default function App() {
              
              content = (
                <div 
-                 className={`absolute top-0 left-0 transition-all ${isReady ? 'animate-bounce' : ''}`}
+                 className={`absolute top-0 left-0 transition-all ${isReady ? 'animate-bounce' : ''} pointer-events-none`}
                  style={{ width: '100%', height: '100%', ...cropStyle }}
                >
                  {/* Plant Graphic */}
@@ -374,7 +510,6 @@ export default function App() {
                     {!isReady && (
                         <div className="absolute bottom-0 w-full bg-black/40 transition-all duration-500" style={{ height: `${100 - progress}%` }}></div>
                     )}
-                    {/* Basic Face/Texture for character */}
                     {isReady && (
                         <div className="absolute inset-0 flex items-center justify-center opacity-50">
                             <span className="text-black text-xs font-bold opacity-50">^_^</span>
@@ -382,9 +517,11 @@ export default function App() {
                     )}
                  </div>
                  {/* Hover Info */}
-                 <div className="hidden group-hover:flex absolute -top-8 left-1/2 -translate-x-1/2 bg-black text-white text-[10px] px-1 rounded whitespace-nowrap z-50 pointer-events-none">
-                    {def.name} {isReady ? '(Ready)' : `${Math.floor(progress)}%`}
-                 </div>
+                 {!isDragging && (
+                    <div className="hidden group-hover:flex absolute -top-8 left-1/2 -translate-x-1/2 bg-black text-white text-[10px] px-1 rounded whitespace-nowrap z-50">
+                        {def.name} {isReady ? '(Ready)' : `${Math.floor(progress)}%`}
+                    </div>
+                 )}
                </div>
              );
           }
@@ -392,7 +529,8 @@ export default function App() {
           return (
             <div 
               key={plot.id}
-              onClick={() => handlePlotClick(plot.id)}
+              onMouseDown={() => { setIsDragging(true); handlePlotInteraction(index); }}
+              onMouseEnter={() => { if (isDragging) handlePlotInteraction(index); }}
               className={`
                 w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 
                 bg-[#5d4037] border border-[#3e2723] 
@@ -442,10 +580,21 @@ export default function App() {
              </div>
          </div>
          
+         {/* Active Mascot Display */}
+         {gameState.activeMascot && (
+             <div className="absolute top-3 right-4 flex items-center gap-2 bg-stone-800 px-3 py-1 rounded border border-yellow-500/50">
+                 <span className="text-2xl" role="img" aria-label="mascot">{MASCOTS[gameState.activeMascot].icon}</span>
+                 <div className="flex flex-col">
+                    <span className="text-[10px] text-stone-400 uppercase leading-none">Companion</span>
+                    <span className="text-xs font-bold text-yellow-100">{MASCOTS[gameState.activeMascot].name}</span>
+                 </div>
+             </div>
+         )}
+         
          {/* Toast Notifications */}
-         <div className="absolute top-16 left-1/2 -translate-x-1/2 flex flex-col gap-1 pointer-events-none z-50">
+         <div className="absolute top-16 right-4 flex flex-col gap-1 pointer-events-none z-50 items-end">
             {notifications.map(n => (
-                <div key={n.id} className="bg-black/80 text-white px-3 py-1 rounded text-sm animate-fade-in-down border border-stone-500">
+                <div key={n.id} className="bg-black/80 text-white px-3 py-1 rounded text-sm animate-fade-in-down border border-stone-500 shadow-lg">
                     {n.text}
                 </div>
             ))}
@@ -456,15 +605,27 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden relative z-10">
         
         {/* Left: The Farm */}
-        <div className="flex-1 flex items-center justify-center p-4 overflow-auto">
+        <div className="flex-1 flex flex-col items-center justify-center p-4 overflow-auto relative">
             {renderGrid()}
+            
+            {/* Quick Actions Panel */}
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2 z-30">
+                 <Tooltip text="Harvest all ready crops">
+                    <button 
+                        onClick={handleHarvestAll}
+                        className="bg-yellow-600 hover:bg-yellow-500 text-white border-b-4 border-yellow-800 active:border-b-0 active:translate-y-1 px-4 py-2 rounded font-bold shadow-lg flex items-center gap-2"
+                    >
+                        🧺 Harvest All
+                    </button>
+                 </Tooltip>
+            </div>
         </div>
 
         {/* Right: UI Panel */}
         <div className="w-80 sm:w-96 bg-stone-900/95 border-l-4 border-stone-700 flex flex-col shadow-2xl">
             {/* Tabs */}
             <div className="flex border-b border-stone-700">
-                {(['INVENTORY', 'CRAFTING', 'ORDERS', 'SETTINGS'] as const).map(tab => (
+                {(['INVENTORY', 'CRAFTING', 'ORDERS', 'MASCOTS'] as const).map(tab => (
                     <button
                         key={tab}
                         onClick={() => setActiveTab(tab)}
@@ -543,6 +704,20 @@ export default function App() {
                                 )}
                             </div>
                         </div>
+                        
+                        {/* Import/Export moved here since Settings is gone */}
+                        <div className="bg-stone-800 p-3 rounded border border-stone-600 mt-4">
+                             <h3 className="text-stone-400 text-xs uppercase mb-2">System</h3>
+                             <div className="grid grid-cols-2 gap-2">
+                                 <button onClick={exportSave} className="bg-blue-900/50 hover:bg-blue-800 text-blue-200 text-xs py-2 px-3 rounded border border-blue-800">
+                                     Export Save
+                                 </button>
+                                 <label className="bg-green-900/50 hover:bg-green-800 text-green-200 text-xs py-2 px-3 rounded border border-green-800 text-center cursor-pointer">
+                                     Import Save
+                                     <input type="file" accept=".json" onChange={importSave} ref={inputFileRef} className="hidden" />
+                                 </label>
+                             </div>
+                        </div>
                     </div>
                 )}
 
@@ -552,11 +727,12 @@ export default function App() {
                         {RECIPES.filter(r => r.unlockLevel <= gameState.level).map(recipe => {
                             const outputItem = ITEMS[recipe.output];
                             const canCraft = recipe.inputs.every(input => (gameState.inventory[input.item] || 0) >= input.count);
+                            const craftTime = getAdjustedCraftTime(recipe.craftTimeMs, gameState.activeMascot);
                             return (
                                 <div key={recipe.id} className="bg-stone-800 p-3 rounded border border-stone-600">
                                     <div className="flex justify-between items-start mb-2">
                                         <span className="font-bold text-yellow-200">{outputItem.name}</span>
-                                        <span className="text-xs text-blue-300">+{recipe.xpReward}XP</span>
+                                        <span className="text-xs text-blue-300">+{getAdjustedXp(recipe.xpReward, gameState.activeMascot)}XP</span>
                                     </div>
                                     <div className="text-xs text-stone-400 mb-2 flex flex-wrap gap-2">
                                         Requires: 
@@ -571,7 +747,7 @@ export default function App() {
                                         disabled={!canCraft}
                                         className={`w-full py-1 text-sm rounded ${canCraft ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-stone-700 text-stone-500 cursor-not-allowed'}`}
                                     >
-                                        Craft
+                                        Craft ({craftTime / 1000}s)
                                     </button>
                                 </div>
                             );
@@ -595,6 +771,9 @@ export default function App() {
                          )}
                          {gameState.orders.map(order => {
                              const canFulfill = order.items.every(req => (gameState.inventory[req.item] || 0) >= req.count);
+                             const rewardMoney = getAdjustedOrderMoney(order.rewardMoney, gameState.activeMascot);
+                             const rewardXp = getAdjustedXp(order.rewardXp, gameState.activeMascot);
+                             
                              return (
                                 <div key={order.id} className="bg-stone-100 text-stone-900 p-3 rounded border-b-4 border-stone-300 relative">
                                     {/* Paper Clip Visual */}
@@ -612,8 +791,8 @@ export default function App() {
                                         ))}
                                     </div>
                                     <div className="flex justify-between items-center bg-stone-200 p-2 rounded mb-2">
-                                        <span className="font-bold text-yellow-700">{order.rewardMoney} G</span>
-                                        <span className="font-bold text-blue-700">{order.rewardXp} XP</span>
+                                        <span className="font-bold text-yellow-700">{rewardMoney} G</span>
+                                        <span className="font-bold text-blue-700">{rewardXp} XP</span>
                                     </div>
                                     <button
                                         onClick={() => handleCompleteOrder(order.id)}
@@ -628,38 +807,50 @@ export default function App() {
                     </div>
                 )}
 
-                {/* SETTINGS */}
-                {activeTab === 'SETTINGS' && (
+                {/* MASCOTS */}
+                {activeTab === 'MASCOTS' && (
                     <div className="space-y-4">
-                        <div className="bg-stone-800 p-3 rounded border border-stone-600">
-                             <h3 className="text-stone-400 text-xs uppercase mb-2">Data Management</h3>
-                             <div className="grid grid-cols-2 gap-2">
-                                 <button onClick={exportSave} className="bg-blue-600 hover:bg-blue-500 text-white text-sm py-2 px-3 rounded">
-                                     Export Save
-                                 </button>
-                                 <label className="bg-green-600 hover:bg-green-500 text-white text-sm py-2 px-3 rounded text-center cursor-pointer">
-                                     Import Save
-                                     <input type="file" accept=".json" onChange={importSave} ref={inputFileRef} className="hidden" />
-                                 </label>
-                             </div>
+                        <div className="text-xs text-stone-400 p-2 bg-stone-800 rounded border border-stone-600">
+                            Equip a mascot to gain special farming powers! You can only have one active at a time.
                         </div>
 
-                        <div className="bg-stone-800 p-3 rounded border border-stone-600">
-                            <h3 className="text-stone-400 text-xs uppercase mb-2">Environment</h3>
-                            <p className="text-xs text-stone-500 mb-3">Use AI to generate a seamless forest border.</p>
-                            <button 
-                                onClick={generateForest}
-                                disabled={!!gameState.forestTexture}
-                                className={`w-full text-sm py-2 px-3 rounded ${gameState.forestTexture ? 'bg-stone-700 text-stone-500' : 'bg-purple-600 hover:bg-purple-500 text-white'}`}
-                            >
-                                {gameState.forestTexture ? 'Forest Generated' : 'Generate Forest (AI)'}
-                            </button>
-                        </div>
-                        
-                        <div className="text-center text-xs text-stone-600 mt-8">
-                            Pixel Farm v1.1 <br/>
-                            Built with React & Tailwind
-                        </div>
+                        {Object.values(MASCOTS).map(mascot => {
+                            const isOwned = gameState.ownedMascots.includes(mascot.id);
+                            const isActive = gameState.activeMascot === mascot.id;
+                            const canAfford = gameState.money >= mascot.price;
+
+                            return (
+                                <div key={mascot.id} className={`p-3 rounded border-2 relative overflow-hidden ${isActive ? 'bg-stone-800 border-yellow-500' : 'bg-stone-800 border-stone-600'}`}>
+                                    {isActive && <div className="absolute top-0 right-0 bg-yellow-500 text-black text-[10px] px-2 font-bold">EQUIPPED</div>}
+                                    
+                                    <div className="flex gap-3 items-start mb-3">
+                                        <div className="text-4xl bg-stone-900 p-2 rounded border border-stone-700">{mascot.icon}</div>
+                                        <div>
+                                            <h4 className={`font-bold ${isOwned ? 'text-white' : 'text-stone-400'}`}>{mascot.name}</h4>
+                                            <p className="text-xs text-stone-500 leading-tight mt-1">{mascot.description}</p>
+                                        </div>
+                                    </div>
+
+                                    {isOwned ? (
+                                        <button 
+                                            onClick={() => equipMascot(mascot.id)}
+                                            disabled={isActive}
+                                            className={`w-full py-1 text-sm rounded ${isActive ? 'bg-stone-700 text-stone-500 cursor-default' : 'bg-green-600 hover:bg-green-500 text-white'}`}
+                                        >
+                                            {isActive ? 'Active' : 'Equip'}
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={() => buyMascot(mascot.id)}
+                                            disabled={!canAfford}
+                                            className={`w-full py-1 text-sm rounded flex justify-center items-center gap-1 ${canAfford ? 'bg-yellow-600 hover:bg-yellow-500 text-white' : 'bg-stone-700 text-stone-500 cursor-not-allowed'}`}
+                                        >
+                                            Buy for {mascot.price}G
+                                        </button>
+                                    )}
+                                </div>
+                            );
+                        })}
                     </div>
                 )}
             </div>

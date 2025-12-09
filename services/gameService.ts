@@ -1,5 +1,5 @@
 
-import { GameState, ItemType, Order, Plot, GRID_SIZE, TOTAL_PLOTS } from '../types';
+import { GameState, ItemType, Order, Plot, GRID_SIZE, TOTAL_PLOTS, MascotType } from '../types';
 import { ITEMS } from '../items';
 import { LEVEL_XP } from '../constants';
 
@@ -29,6 +29,51 @@ export const initializePlots = (): Plot[] => {
   return plots;
 };
 
+// --- MASCOT BUFF HELPERS ---
+
+export const getAdjustedGrowthTime = (cropId: ItemType, mascot: MascotType | null): number => {
+  const crop = ITEMS[cropId];
+  if (!crop.growthTimeMs) return 0;
+  let time = crop.growthTimeMs;
+
+  // CHICKEN: Speed up crops level 1-5
+  if (mascot === MascotType.CHICKEN && crop.unlockLevel <= 5) {
+    time *= 0.75;
+  }
+  // OWL: Speed up crops level 10+
+  if (mascot === MascotType.OWL && crop.unlockLevel >= 10) {
+    time *= 0.8;
+  }
+
+  return time;
+};
+
+export const getAdjustedCraftTime = (baseTime: number, mascot: MascotType | null): number => {
+  // SHEEP: Speed up crafting
+  if (mascot === MascotType.SHEEP) {
+    return baseTime * 0.8;
+  }
+  return baseTime;
+};
+
+export const getAdjustedXp = (baseXp: number, mascot: MascotType | null): number => {
+  // PIG: More XP
+  if (mascot === MascotType.PIG) {
+    return Math.ceil(baseXp * 1.2);
+  }
+  return baseXp;
+};
+
+export const getAdjustedOrderMoney = (baseMoney: number, mascot: MascotType | null): number => {
+  // DOG: More money from orders
+  if (mascot === MascotType.DOG) {
+    return Math.ceil(baseMoney * 1.2);
+  }
+  return baseMoney;
+};
+
+// ---------------------------
+
 export const calculateOfflineProgress = (savedState: GameState): { updatedState: GameState; messages: string[] } => {
   const now = Date.now();
   const diff = now - savedState.lastSaveTime;
@@ -41,12 +86,12 @@ export const calculateOfflineProgress = (savedState: GameState): { updatedState:
   newState.plots = newState.plots.map(plot => {
     // Only process the root plot of a crop
     if (plot.plantedCrop && plot.plantTime && plot.occupiedBy === null) {
-      const cropDef = ITEMS[plot.plantedCrop];
-      if (cropDef.growthTimeMs) {
-        const finishTime = plot.plantTime + cropDef.growthTimeMs;
-        if (finishTime <= now && finishTime > savedState.lastSaveTime) {
-          grownCount++;
-        }
+      // Use adjusted growth time
+      const growthDuration = getAdjustedGrowthTime(plot.plantedCrop, savedState.activeMascot);
+      
+      const finishTime = plot.plantTime + growthDuration;
+      if (finishTime <= now && finishTime > savedState.lastSaveTime) {
+        grownCount++;
       }
     }
     return plot;
