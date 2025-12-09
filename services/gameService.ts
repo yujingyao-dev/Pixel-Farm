@@ -1,8 +1,8 @@
 
-
-import { GameState, ItemType, Order, Plot, GRID_SIZE, TOTAL_PLOTS, MascotType, WeatherType } from '../types';
+import { GameState, ItemType, Order, Plot, GRID_SIZE, TOTAL_PLOTS, MascotType, WeatherType, GameEventDef } from '../types';
 import { ITEMS } from '../items';
 import { LEVEL_XP } from '../constants';
+import { GAME_EVENTS } from '../events';
 
 export const getLevelFromXp = (xp: number): number => {
   let level = 1;
@@ -25,10 +25,6 @@ export const getLevelFromXp = (xp: number): number => {
 export const getPlotTier = (index: number): number => {
     const x = index % GRID_SIZE;
     const y = Math.floor(index / GRID_SIZE);
-    
-    // Calculate distance from center box
-    // Distance from the range [9-1, 9] (Indices 8,9 are centerish)
-    // Actually easier to just check bounds
     
     // Check Tier 0 (Center 8x8: 5 to 12)
     if (x >= 5 && x <= 12 && y >= 5 && y <= 12) return 0;
@@ -123,12 +119,6 @@ export const getAdjustedOrderMoney = (baseMoney: number, mascot: MascotType | nu
 };
 
 // Get crop yield based on land tier
-// Tier 0: 1x
-// Tier 1: 1.2x
-// Tier 2: 1.4x
-// Tier 3: 1.6x
-// Tier 4: 1.8x
-// Tier 5: 2.0x
 export const getTierYieldMultiplier = (tier: number): number => {
     return 1 + (tier * 0.2);
 };
@@ -173,9 +163,23 @@ export const calculateOfflineProgress = (savedState: GameState): { updatedState:
       newState.weatherEndTime = now + next.duration;
   }
 
+  // Update game time offline
+  // 1 real second = 0.04 game hours (1 minute = 2.4 hours)
+  const gameHoursPassed = (diff / 1000) * 0.04;
+  newState.gameTime = (newState.gameTime + gameHoursPassed) % 24;
+
   newState.lastSaveTime = now;
   return { updatedState: newState, messages };
 };
+
+// --- EVENTS ---
+
+export const generateRandomEvent = (level: number): GameEventDef | null => {
+    const possibleEvents = GAME_EVENTS.filter(e => e.unlockLevel <= level);
+    if (possibleEvents.length === 0) return null;
+    return possibleEvents[Math.floor(Math.random() * possibleEvents.length)];
+};
+
 
 // --- FICTIONAL ORDER DATA ---
 const REQUESTER_NAMES = [

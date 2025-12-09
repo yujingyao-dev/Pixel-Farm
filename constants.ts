@@ -1,5 +1,4 @@
 
-
 import { ItemType, WeatherType } from './types';
 
 // XP curve for 20 levels
@@ -34,5 +33,7 @@ export const INITIAL_GAME_STATE = {
   activeMascot: null,
   weather: WeatherType.SUNNY,
   weatherEndTime: Date.now() + 1000 * 60 * 5, // 5 mins sunny start
-  expansionLevel: 0
+  expansionLevel: 0,
+  gameTime: 6.0, // Start at 6:00 AM
+  activeEvent: null
 };

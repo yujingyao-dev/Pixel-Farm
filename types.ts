@@ -119,6 +119,25 @@ export interface Order {
   isEmergency: boolean;
 }
 
+export interface GameEventDef {
+  id: string;
+  title: string;
+  description: string;
+  targetItem: ItemType;
+  targetAmount: number;
+  durationMs: number;
+  unlockLevel: number;
+  rewardMoney: number;
+  rewardXp: number;
+}
+
+export interface ActiveEvent {
+  eventId: string;
+  startTime: number;
+  endTime: number;
+  currentProgress: number;
+}
+
 export interface GameState {
   money: number;
   xp: number;
@@ -134,6 +153,8 @@ export interface GameState {
   weather: WeatherType;
   weatherEndTime: number;
   expansionLevel: number; // 0 (8x8) to 5 (18x18)
+  gameTime: number; // 0.00 to 24.00 representing hours of the day
+  activeEvent: ActiveEvent | null;
 }
 
 export const GRID_SIZE = 18; // Max grid size

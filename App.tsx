@@ -1,11 +1,11 @@
 
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, ItemType, GRID_SIZE, Plot, Order, MascotType, TOTAL_PLOTS, WeatherType } from './types';
 import { INITIAL_GAME_STATE, LEVEL_XP, EXPANSION_COSTS } from './constants';
 import { ITEMS } from './items';
 import { RECIPES } from './recipes';
 import { MASCOTS } from './mascots';
+import { GAME_EVENTS } from './events';
 import { 
   initializePlots, 
   calculateOfflineProgress, 
@@ -17,7 +17,8 @@ import {
   getAdjustedOrderMoney,
   getNextWeather,
   getPlotTier,
-  getTierYieldMultiplier
+  getTierYieldMultiplier,
+  generateRandomEvent
 } from './services/gameService';
 import { Tooltip } from './components/Tooltip';
 
@@ -45,6 +46,7 @@ export default function App() {
   const [now, setNow] = useState(Date.now());
   const [isDragging, setIsDragging] = useState(false);
   const [ambientEntities, setAmbientEntities] = useState<AmbientEntity[]>([]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   // Game Loop
   useEffect(() => {
@@ -52,26 +54,49 @@ export default function App() {
       const currentTime = Date.now();
       setNow(currentTime);
       
-      // Order Logic
       setGameState(prev => {
         let nextState = { ...prev };
 
-        // 1. Check Weather
+        // 1. Time Advancement
+        // Advance 0.04 hours per second (2.4 hours per minute). 1 Full day = 10 minutes.
+        const timeIncrement = 0.04; 
+        nextState.gameTime = (prev.gameTime + timeIncrement) % 24;
+
+        // 2. Weather
         if (currentTime > prev.weatherEndTime) {
             const nextW = getNextWeather();
             nextState.weather = nextW.type;
             nextState.weatherEndTime = currentTime + nextW.duration;
         }
 
-        // 2. Check Orders
+        // 3. Orders
         const validOrders = prev.orders.filter(o => o.expiresAt > currentTime);
-        const hasExpired = validOrders.length !== prev.orders.length;
-
         if (validOrders.length < 3 && Math.random() < 0.05) { 
              const newOrder = generateNewOrder(prev.level, validOrders);
              nextState.orders = [...validOrders, newOrder];
-        } else if (hasExpired) {
+        } else if (validOrders.length !== prev.orders.length) {
              nextState.orders = validOrders;
+        }
+
+        // 4. Random Events
+        // Check if event failed/expired
+        if (prev.activeEvent && currentTime > prev.activeEvent.endTime) {
+            const eventDef = GAME_EVENTS.find(e => e.id === prev.activeEvent!.eventId);
+            setNotifications(old => [...old, { id: Date.now(), text: `Event Failed: ${eventDef?.title}` }]);
+            nextState.activeEvent = null;
+        }
+        // Try spawn event (1% chance per second if no event)
+        if (!prev.activeEvent && Math.random() < 0.01) {
+            const newEventDef = generateRandomEvent(prev.level);
+            if (newEventDef) {
+                nextState.activeEvent = {
+                    eventId: newEventDef.id,
+                    startTime: currentTime,
+                    endTime: currentTime + newEventDef.durationMs,
+                    currentProgress: 0
+                };
+                // We can't call notify inside here easily without effect, so we do it via effect detection or state array
+            }
         }
 
         return nextState;
@@ -87,40 +112,34 @@ export default function App() {
         const newEntity: AmbientEntity = {
             id: currentTime,
             type,
-            x: Math.random() * 90, // Keep away from edges
+            x: Math.random() * 90, 
             y: Math.random() * 90,
             createdAt: currentTime
         };
         setAmbientEntities(prev => [...prev, newEntity]);
       }
 
-      // Cleanup Ambient Life
       setAmbientEntities(prev => prev.filter(e => {
           const age = currentTime - e.createdAt;
-          if (e.type === 'DOG') return age < 8000; // Dog runs away
-          if (e.type === 'FLOWER') return age < 15000; // Flower wilts
-          return age < 10000; // Butterflies fly away
+          if (e.type === 'DOG') return age < 8000;
+          if (e.type === 'FLOWER') return age < 15000;
+          return age < 10000;
       }));
 
     }, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // Effect to notify weather changes
-  const prevWeatherRef = useRef(gameState.weather);
+  // Effect to notify event start
+  const prevEventRef = useRef<string | null>(null);
   useEffect(() => {
-    if (prevWeatherRef.current !== gameState.weather) {
-      notify(`Weather changed to ${gameState.weather}!`);
-      prevWeatherRef.current = gameState.weather;
-    }
-  }, [gameState.weather]);
-
-  // Global mouse up
-  useEffect(() => {
-    const handleGlobalMouseUp = () => setIsDragging(false);
-    window.addEventListener('mouseup', handleGlobalMouseUp);
-    return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
-  }, []);
+      const currentEventId = gameState.activeEvent?.eventId || null;
+      if (currentEventId !== prevEventRef.current && currentEventId) {
+          const def = GAME_EVENTS.find(e => e.id === currentEventId);
+          if (def) notify(`📢 New Event: ${def.title}!`);
+      }
+      prevEventRef.current = currentEventId;
+  }, [gameState.activeEvent]);
 
   const notify = useCallback((text: string) => {
     const id = Date.now() + Math.random();
@@ -145,7 +164,6 @@ export default function App() {
           for (let c = 0; c < width; c++) {
               const targetIdx = index + (r * GRID_SIZE) + c;
               if (targetIdx >= plots.length) return false;
-              // Must be empty, no crop, and unlocked
               const p = plots[targetIdx];
               if (p.plantedCrop || p.occupiedBy !== null || !p.isUnlocked) {
                   return false;
@@ -153,6 +171,23 @@ export default function App() {
           }
       }
       return true;
+  };
+
+  const checkEventProgress = (items: Record<string, number>, currentEvent: any, state: GameState) => {
+      if (!currentEvent) return null;
+      const eventDef = GAME_EVENTS.find(e => e.id === currentEvent.eventId);
+      if (!eventDef) return null;
+
+      const harvestedAmount = items[eventDef.targetItem] || 0;
+      if (harvestedAmount > 0) {
+          const newProgress = currentEvent.currentProgress + harvestedAmount;
+          if (newProgress >= eventDef.targetAmount) {
+              // Complete
+              return { completed: true, def: eventDef };
+          }
+          return { completed: false, progress: newProgress };
+      }
+      return null;
   };
 
   const handlePlotInteraction = (plotIndex: number) => {
@@ -180,20 +215,11 @@ export default function App() {
          
          setGameState(prev => {
             const newInventory = { ...prev.inventory };
-            
-            // YIELD CALCULATION
             let yieldCount = 1;
-            // 1. Tier Bonus
             const tierMult = getTierYieldMultiplier(plot.tier);
-            // Base yield is 1, multiplied by tier, floor it, then add probability for remainder?
-            // Simple approach: Guaranteed yield * multiplier. Round randomly.
             const calculatedYield = 1 * tierMult;
             yieldCount = Math.floor(calculatedYield);
-            if (Math.random() < (calculatedYield - yieldCount)) {
-                yieldCount += 1;
-            }
-
-            // 2. Cow Bonus
+            if (Math.random() < (calculatedYield - yieldCount)) yieldCount += 1;
             if (prev.activeMascot === MascotType.COW && Math.random() < 0.15) {
                 yieldCount *= 2;
                 notify("Lucky Cow! Double Harvest! 🐮");
@@ -201,6 +227,22 @@ export default function App() {
 
             newInventory[plot.plantedCrop!] = (newInventory[plot.plantedCrop!] || 0) + yieldCount;
             
+            // Event Logic
+            let nextActiveEvent = prev.activeEvent;
+            let moneyBonus = 0;
+            let xpBonus = 0;
+            if (prev.activeEvent) {
+                const eventRes = checkEventProgress({ [plot.plantedCrop!]: yieldCount }, prev.activeEvent, prev);
+                if (eventRes?.completed) {
+                     nextActiveEvent = null;
+                     moneyBonus = eventRes.def.rewardMoney;
+                     xpBonus = eventRes.def.rewardXp;
+                     notify(`🏆 Event Complete: ${eventRes.def.title}! (+${moneyBonus}G, +${xpBonus}XP)`);
+                } else if (eventRes) {
+                     nextActiveEvent = { ...prev.activeEvent, currentProgress: eventRes.progress };
+                }
+            }
+
             const newPlots = [...prev.plots];
             newPlots[plotIndex] = { ...plot, plantedCrop: null, plantTime: null, occupiedBy: null };
             
@@ -216,7 +258,7 @@ export default function App() {
                 }
             }
             
-            const newXp = prev.xp + finalXp;
+            const newXp = prev.xp + finalXp + xpBonus;
             const newLevel = getLevelFromXp(newXp);
             if (newLevel > prev.level) notify(`Level Up! You are now level ${newLevel}`);
 
@@ -225,7 +267,9 @@ export default function App() {
               inventory: newInventory,
               plots: newPlots,
               xp: newXp,
+              money: prev.money + moneyBonus,
               level: newLevel,
+              activeEvent: nextActiveEvent,
               unlockedItems: Object.values(ITEMS).filter(i => i.unlockLevel <= newLevel).map(i => i.id)
             };
          });
@@ -312,84 +356,97 @@ export default function App() {
                 earnedXp += cropXp;
 
                 let yieldCount = 1;
-                // Tier Yield
                 const tierMult = getTierYieldMultiplier(plot.tier);
-                const calculatedYield = 1 * tierMult;
-                yieldCount = Math.floor(calculatedYield);
-                if (Math.random() < (calculatedYield - yieldCount)) yieldCount += 1;
+                yieldCount = Math.floor(1 * tierMult);
+                if (Math.random() < ((1 * tierMult) - yieldCount)) yieldCount += 1;
+                if (prev.activeMascot === MascotType.COW && Math.random() < 0.15) yieldCount *= 2;
 
-                // Cow Bonus
-                if (prev.activeMascot === MascotType.COW && Math.random() < 0.15) {
-                    yieldCount *= 2;
-                }
                 newInventory[plot.plantedCrop!] = (newInventory[plot.plantedCrop!] || 0) + yieldCount;
-                earnedItems[cropDef.name] = (earnedItems[cropDef.name] || 0) + yieldCount;
+                earnedItems[cropDef.id] = (earnedItems[cropDef.id] || 0) + yieldCount; // Use ID for logic
 
                 newPlots[index] = { ...plot, plantedCrop: null, plantTime: null, occupiedBy: null };
-                
                 const w = cropDef.width || 1;
                 const h = cropDef.height || 1;
                 for (let r = 0; r < h; r++) {
                     for (let c = 0; c < w; c++) {
                         if (r === 0 && c === 0) continue; 
                         const targetIdx = index + (r * GRID_SIZE) + c;
-                        if (targetIdx < TOTAL_PLOTS) {
-                            newPlots[targetIdx] = { ...newPlots[targetIdx], occupiedBy: null, plantedCrop: null };
-                        }
+                        if (targetIdx < TOTAL_PLOTS) newPlots[targetIdx] = { ...newPlots[targetIdx], occupiedBy: null, plantedCrop: null };
                     }
                 }
             }
         });
 
-        if (harvestedCount > 0) {
-            const itemSummary = Object.entries(earnedItems).map(([name, count]) => `${name} x${count}`).join(', ');
-            notify(`Harvest All: ${itemSummary} (+${earnedXp} XP)`);
-        } else {
+        if (harvestedCount === 0) {
             notify("Nothing ready to harvest!");
             return prev;
         }
 
-        const finalLevel = getLevelFromXp(currentXp);
+        // Event Check Batch
+        let nextActiveEvent = prev.activeEvent;
+        let moneyBonus = 0;
+        let xpBonus = 0;
+
+        if (prev.activeEvent) {
+             const eventRes = checkEventProgress(earnedItems, prev.activeEvent, prev);
+             if (eventRes?.completed) {
+                  nextActiveEvent = null;
+                  moneyBonus = eventRes.def.rewardMoney;
+                  xpBonus = eventRes.def.rewardXp;
+                  notify(`🏆 Event Complete: ${eventRes.def.title}!`);
+             } else if (eventRes) {
+                  nextActiveEvent = { ...prev.activeEvent, currentProgress: eventRes.progress };
+             }
+        }
+        
+        // Notification String
+        const itemSummary = Object.entries(earnedItems).map(([id, count]) => `${ITEMS[id as ItemType].name} x${count}`).join(', ');
+        notify(`Harvested: ${itemSummary} (+${earnedXp} XP)`);
+
+        const finalLevel = getLevelFromXp(currentXp + xpBonus);
         if (finalLevel > prev.level) notify(`Level Up! You are now level ${finalLevel}`);
 
         return {
             ...prev,
             inventory: newInventory,
             plots: newPlots,
-            xp: currentXp,
+            xp: currentXp + xpBonus,
+            money: prev.money + moneyBonus,
             level: finalLevel,
+            activeEvent: nextActiveEvent,
             unlockedItems: Object.values(ITEMS).filter(i => i.unlockLevel <= finalLevel).map(i => i.id)
         };
     });
   };
 
+  // ... (Keep handleExpandLand, handleCraft, handleSell, handleCompleteOrder, exportSave, importSave, buyMascot, equipMascot same)
   const handleExpandLand = () => {
-      const nextLevel = gameState.expansionLevel + 1;
-      if (nextLevel >= EXPANSION_COSTS.length) {
-          notify("Max expansion reached!");
-          return;
-      }
-      const cost = EXPANSION_COSTS[nextLevel];
+    const nextLevel = gameState.expansionLevel + 1;
+    if (nextLevel >= EXPANSION_COSTS.length) {
+        notify("Max expansion reached!");
+        return;
+    }
+    const cost = EXPANSION_COSTS[nextLevel];
 
-      if (gameState.money >= cost) {
-          setGameState(prev => {
-              const nextLvl = prev.expansionLevel + 1;
-              const newPlots = prev.plots.map(p => ({
-                  ...p,
-                  isUnlocked: p.tier <= nextLvl
-              }));
-              
-              return {
-                  ...prev,
-                  money: prev.money - cost,
-                  expansionLevel: nextLvl,
-                  plots: newPlots
-              };
-          });
-          notify(`Land Expanded! (Level ${nextLevel})`);
-      } else {
-          notify(`Need ${cost}G to expand!`);
-      }
+    if (gameState.money >= cost) {
+        setGameState(prev => {
+            const nextLvl = prev.expansionLevel + 1;
+            const newPlots = prev.plots.map(p => ({
+                ...p,
+                isUnlocked: p.tier <= nextLvl
+            }));
+            
+            return {
+                ...prev,
+                money: prev.money - cost,
+                expansionLevel: nextLvl,
+                plots: newPlots
+            };
+        });
+        notify(`Land Expanded! (Level ${nextLevel})`);
+    } else {
+        notify(`Need ${cost}G to expand!`);
+    }
   };
 
   const handleCraft = (recipeId: string) => {
@@ -474,7 +531,6 @@ export default function App() {
     }
   };
 
-  // Import/Export
   const inputFileRef = useRef<HTMLInputElement>(null);
 
   const exportSave = () => {
@@ -494,28 +550,19 @@ export default function App() {
     reader.onload = (e) => {
       try {
         const raw = JSON.parse(e.target?.result as string);
-        
-        // MIGRATION LOGIC: 12x12 -> 18x18
         let newPlots = initializePlots(0);
         let expansionLvl = raw.expansionLevel || 0;
 
         if (Array.isArray(raw.plots) && raw.plots.length === 144) {
-            notify("Migrating old save (12x12) to new system (18x18)...");
-            // Old map is 12x12. New map center 12x12 is Tier 2.
-            // Indices for center 12x12 starts at (3,3) in 18x18.
-            expansionLvl = Math.max(expansionLvl, 2); // Unlock up to Tier 2
-            
-            // Re-init plots with unlocked level 2
+            notify("Migrating old save...");
+            expansionLvl = Math.max(expansionLvl, 2); 
             newPlots = initializePlots(expansionLvl);
-            
-            // Map old plots
             for(let r=0; r<12; r++) {
                 for(let c=0; c<12; c++) {
                     const oldIdx = r*12 + c;
                     const newR = r + 3;
                     const newC = c + 3;
                     const newIdx = newR * 18 + newC;
-                    
                     const oldP = raw.plots[oldIdx];
                     newPlots[newIdx] = {
                         ...newPlots[newIdx],
@@ -527,7 +574,6 @@ export default function App() {
                 }
             }
         } else if (Array.isArray(raw.plots) && raw.plots.length === TOTAL_PLOTS) {
-            // Already new format
             newPlots = raw.plots;
         }
 
@@ -541,14 +587,15 @@ export default function App() {
             ownedMascots: raw.ownedMascots || [],
             unlockedItems: raw.unlockedItems || [ItemType.WHEAT],
             weather: raw.weather || WeatherType.SUNNY,
-            weatherEndTime: raw.weatherEndTime || Date.now() + 60000
+            weatherEndTime: raw.weatherEndTime || Date.now() + 60000,
+            gameTime: raw.gameTime || 6.0,
+            activeEvent: raw.activeEvent || null
         };
 
         const { updatedState, messages } = calculateOfflineProgress(safeState);
         setGameState(updatedState);
         messages.forEach(msg => notify(msg));
         notify("Game Loaded Successfully!");
-        
       } catch (err) {
         console.error(err);
         notify("Failed to load save");
@@ -574,10 +621,7 @@ export default function App() {
   };
 
   const equipMascot = (mascotId: MascotType) => {
-      setGameState(prev => ({
-          ...prev,
-          activeMascot: mascotId
-      }));
+      setGameState(prev => ({ ...prev, activeMascot: mascotId }));
       notify(`Equipped ${MASCOTS[mascotId].name}`);
   };
 
@@ -598,19 +642,38 @@ export default function App() {
   };
 
   const getSoilColor = (tier: number, isUnlocked: boolean) => {
-      if (!isUnlocked) return 'bg-stone-900 border-stone-800 opacity-80'; // Locked look
+      if (!isUnlocked) return 'bg-[#4a6741] border-[#3e5736]';
       switch(tier) {
-          case 0: return 'bg-[#795548] border-[#5d4037]'; // Standard
+          case 0: return 'bg-[#795548] border-[#5d4037]';
           case 1: return 'bg-[#6d4c41] border-[#4e342e]'; 
           case 2: return 'bg-[#5d4037] border-[#3e2723]';
           case 3: return 'bg-[#4e342e] border-[#3e2723]';
           case 4: return 'bg-[#3e2723] border-[#251815]';
-          case 5: return 'bg-[#281a17] border-black'; // Richest
+          case 5: return 'bg-[#281a17] border-black';
           default: return 'bg-[#795548]';
       }
   };
 
-  // Styles for weather effects
+  const getDayPhaseColor = () => {
+      const h = gameState.gameTime;
+      // Night: 22 - 5
+      if (h >= 22 || h < 5) return 'bg-blue-900/40 mix-blend-multiply'; 
+      // Dawn: 5 - 7
+      if (h >= 5 && h < 7) return 'bg-orange-500/20 mix-blend-overlay';
+      // Dusk: 18 - 20
+      if (h >= 18 && h < 20) return 'bg-pink-500/20 mix-blend-overlay';
+      // Night start: 20 - 22
+      if (h >= 20 && h < 22) return 'bg-indigo-900/30 mix-blend-multiply';
+      // Day
+      return '';
+  };
+
+  const formatGameTime = () => {
+      const h = Math.floor(gameState.gameTime);
+      const m = Math.floor((gameState.gameTime - h) * 60);
+      return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+  };
+
   const getWeatherOverlay = () => {
     switch (gameState.weather) {
         case WeatherType.RAINY:
@@ -650,8 +713,7 @@ export default function App() {
             return <div className="absolute inset-0 pointer-events-none z-30 bg-black/20 mix-blend-multiply transition-colors duration-1000"></div>;
         case WeatherType.WINDY:
              return <div className="absolute inset-0 pointer-events-none z-30 bg-yellow-900/5 mix-blend-overlay"></div>;
-        default:
-            return null; // Sunny
+        default: return null;
     }
   };
 
@@ -732,7 +794,7 @@ export default function App() {
                </div>
              );
           } else if (!plot.isUnlocked) {
-               content = <div className="w-full h-full flex items-center justify-center text-stone-700 text-[8px]">🔒</div>;
+               content = <div className="w-full h-full flex items-center justify-center text-green-900/20 text-[10px]">🔒</div>;
           }
 
           return (
@@ -778,8 +840,9 @@ export default function App() {
         )}
       </div>
 
-      {/* Weather Overlay */}
+      {/* Time & Weather Overlay */}
       {getWeatherOverlay()}
+      <div className={`absolute inset-0 pointer-events-none z-10 transition-colors duration-[2000ms] ${getDayPhaseColor()}`}></div>
 
       {/* Ambient Life Layer */}
       <div className="absolute inset-0 pointer-events-none z-1 overflow-hidden">
@@ -844,19 +907,28 @@ export default function App() {
          </div>
 
          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center opacity-80">
-            <span className="text-3xl animate-pulse">{getWeatherIcon()}</span>
-            <span className="text-[10px] uppercase text-stone-400 tracking-wider">{gameState.weather}</span>
+            <span className="text-2xl">{getWeatherIcon()}</span>
+            <span className="text-lg font-mono font-bold text-yellow-200">{formatGameTime()}</span>
          </div>
          
-         {gameState.activeMascot && (
-             <div className="absolute top-3 right-4 flex items-center gap-2 bg-stone-800 px-3 py-1 rounded border border-yellow-500/50">
-                 <span className="text-2xl" role="img" aria-label="mascot">{MASCOTS[gameState.activeMascot].icon}</span>
-                 <div className="flex flex-col">
-                    <span className="text-[10px] text-stone-400 uppercase leading-none">Companion</span>
-                    <span className="text-xs font-bold text-yellow-100">{MASCOTS[gameState.activeMascot].name}</span>
+         <div className="flex items-center gap-4">
+             {gameState.activeMascot && (
+                 <div className="hidden sm:flex items-center gap-2 bg-stone-800 px-3 py-1 rounded border border-yellow-500/50">
+                     <span className="text-2xl" role="img" aria-label="mascot">{MASCOTS[gameState.activeMascot].icon}</span>
+                     <div className="flex flex-col">
+                        <span className="text-[10px] text-stone-400 uppercase leading-none">Companion</span>
+                        <span className="text-xs font-bold text-yellow-100">{MASCOTS[gameState.activeMascot].name}</span>
+                     </div>
                  </div>
-             </div>
-         )}
+             )}
+             
+             <button 
+                onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
+                className="bg-stone-800 p-2 rounded border border-stone-600 hover:bg-stone-700"
+             >
+                 {isSidebarOpen ? '👉' : '👈'}
+             </button>
+         </div>
          
          <div className="absolute top-24 right-4 flex flex-col gap-1 pointer-events-none z-50 items-end">
             {notifications.map(n => (
@@ -872,6 +944,29 @@ export default function App() {
         
         {/* Left: The Farm */}
         <div className="flex-1 flex flex-col items-center justify-center p-4 overflow-auto relative custom-scrollbar">
+            
+            {/* Active Event Widget */}
+            {gameState.activeEvent && (
+                <div className="absolute top-4 left-4 z-50 bg-stone-900/90 border border-yellow-500 p-3 rounded shadow-xl w-64 animate-pulse-slow">
+                    <h3 className="text-yellow-500 font-bold text-sm uppercase mb-1">
+                        🏆 {GAME_EVENTS.find(e => e.id === gameState.activeEvent!.eventId)?.title}
+                    </h3>
+                    <p className="text-xs text-stone-300 mb-2">
+                        {GAME_EVENTS.find(e => e.id === gameState.activeEvent!.eventId)?.description}
+                    </p>
+                    <div className="w-full bg-stone-700 h-2 rounded mb-1">
+                        <div 
+                            className="bg-yellow-500 h-full rounded transition-all duration-500" 
+                            style={{ width: `${(gameState.activeEvent.currentProgress / GAME_EVENTS.find(e => e.id === gameState.activeEvent!.eventId)!.targetAmount) * 100}%` }}
+                        ></div>
+                    </div>
+                    <div className="flex justify-between text-xs text-stone-400 font-mono">
+                        <span>{gameState.activeEvent.currentProgress} / {GAME_EVENTS.find(e => e.id === gameState.activeEvent!.eventId)!.targetAmount}</span>
+                        <span>{Math.ceil((gameState.activeEvent.endTime - now) / 1000)}s</span>
+                    </div>
+                </div>
+            )}
+
             {renderGrid()}
             
             {/* Quick Actions Panel */}
@@ -898,10 +993,15 @@ export default function App() {
             </div>
         </div>
 
-        {/* Right: UI Panel */}
-        <div className="w-80 sm:w-96 bg-stone-900/95 border-l-4 border-stone-700 flex flex-col shadow-2xl relative z-40">
+        {/* Right: UI Panel (Collapsible) */}
+        <div 
+            className={`
+                bg-stone-900/95 border-l-4 border-stone-700 flex flex-col shadow-2xl relative z-40 transition-all duration-300 ease-in-out
+                ${isSidebarOpen ? 'w-80 sm:w-96 translate-x-0' : 'w-0 translate-x-full opacity-0'}
+            `}
+        >
             {/* Tabs */}
-            <div className="flex border-b border-stone-700">
+            <div className="flex border-b border-stone-700 min-w-[20rem]">
                 {(['INVENTORY', 'CRAFTING', 'ORDERS', 'MASCOTS'] as const).map(tab => (
                     <button
                         key={tab}
@@ -914,7 +1014,7 @@ export default function App() {
             </div>
 
             {/* Tab Content */}
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar min-w-[20rem]">
                 
                 {/* INVENTORY & PLANTING */}
                 {activeTab === 'INVENTORY' && (
