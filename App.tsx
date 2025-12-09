@@ -47,6 +47,7 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [ambientEntities, setAmbientEntities] = useState<AmbientEntity[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isGuideOpen, setIsGuideOpen] = useState(false);
 
   // Game Loop
   useEffect(() => {
@@ -923,6 +924,13 @@ export default function App() {
              )}
              
              <button 
+                onClick={() => setIsGuideOpen(true)}
+                className="bg-stone-800 p-2 rounded border border-stone-600 hover:bg-stone-700 text-sm"
+             >
+                 📖 Guide
+             </button>
+
+             <button 
                 onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
                 className="bg-stone-800 p-2 rounded border border-stone-600 hover:bg-stone-700"
              >
@@ -938,6 +946,76 @@ export default function App() {
             ))}
          </div>
       </div>
+
+      {/* Guide Modal */}
+      {isGuideOpen && (
+          <div className="absolute inset-0 z-[100] bg-black/80 flex items-center justify-center p-4">
+              <div className="bg-stone-900 border-2 border-yellow-600 rounded-lg max-w-2xl w-full max-h-[80vh] flex flex-col shadow-2xl relative">
+                  <button 
+                    onClick={() => setIsGuideOpen(false)}
+                    className="absolute top-2 right-2 text-stone-400 hover:text-white text-xl"
+                  >
+                      ✖
+                  </button>
+                  <div className="p-4 border-b border-stone-700 bg-stone-800 rounded-t-lg">
+                      <h2 className="text-2xl font-bold text-yellow-500">📖 Farmer's Almanac (Guide)</h2>
+                  </div>
+                  <div className="p-6 overflow-y-auto custom-scrollbar space-y-6 text-stone-200">
+                      
+                      <section>
+                          <h3 className="text-lg font-bold text-green-400 mb-2">🌱 The Basics</h3>
+                          <ul className="list-disc pl-5 space-y-1 text-sm">
+                              <li><strong>Planting:</strong> Select seeds from the Inventory tab. Click or drag on empty soil to plant. Seeds cost gold.</li>
+                              <li><strong>Growing:</strong> Crops take time to grow. Hover over a crop to see its name and progress.</li>
+                              <li><strong>Harvesting:</strong> When a crop bounces, it's ready! Use the 'Harvest' tool or click the 'Harvest All' button.</li>
+                              <li><strong>Multi-Tile Crops:</strong> Some crops like Pumpkins take 2x2 space. Ensure you have enough empty 2x2 area to plant them.</li>
+                          </ul>
+                      </section>
+
+                      <section>
+                          <h3 className="text-lg font-bold text-yellow-400 mb-2">💰 Economy & Levelling</h3>
+                          <ul className="list-disc pl-5 space-y-1 text-sm">
+                              <li><strong>Selling:</strong> Sell raw crops directly from your inventory for quick cash.</li>
+                              <li><strong>Orders:</strong> Check the 'Orders' tab. Fulfilling specific requests grants huge XP and Bonus Money. This is the best way to level up!</li>
+                              <li><strong>Crafting:</strong> Turn crops into valuable products (like Bread or Jam) in the Crafting tab. Products sell for more than raw ingredients.</li>
+                              <li><strong>Level Up:</strong> Earning XP unlocks new crops, recipes, and features.</li>
+                          </ul>
+                      </section>
+
+                      <section>
+                          <h3 className="text-lg font-bold text-blue-400 mb-2">🌍 Land & Expansion</h3>
+                          <ul className="list-disc pl-5 space-y-1 text-sm">
+                              <li><strong>Expansion:</strong> You start with a small central plot. Use gold to buy "Land Expansions" to unlock outer rings of soil.</li>
+                              <li><strong>Soil Tiers:</strong> Outer rings have richer soil! Crops grown on higher tier land yield more harvest.</li>
+                              <li><strong>Locked Land:</strong> You cannot plant on dark, locked soil. Purchase an expansion to access it.</li>
+                          </ul>
+                      </section>
+
+                      <section>
+                          <h3 className="text-lg font-bold text-purple-400 mb-2">✨ Advanced Features</h3>
+                          <ul className="list-disc pl-5 space-y-1 text-sm">
+                              <li><strong>Mascots:</strong> Buy mascots in the Mascot tab. Equip them to get passive bonuses (e.g., faster growth, double harvest chance).</li>
+                              <li><strong>Events:</strong> Random events (like "Tomato War") appear occasionally. Harvest the required item within the time limit for massive rewards!</li>
+                              <li><strong>Weather:</strong> Rain, snow, and wind affect the atmosphere.</li>
+                              <li><strong>Offline Progress:</strong> Your farm keeps growing even when you close the game. Come back later to a bountiful harvest!</li>
+                          </ul>
+                      </section>
+
+                      <div className="pt-4 text-center text-xs text-stone-500 italic border-t border-stone-800 mt-4">
+                          "Treat the land well, and it will treat you well." - Grandpa
+                      </div>
+                  </div>
+                  <div className="p-4 border-t border-stone-700 bg-stone-800 rounded-b-lg flex justify-end">
+                      <button 
+                        onClick={() => setIsGuideOpen(false)}
+                        className="bg-yellow-600 hover:bg-yellow-500 text-white px-4 py-2 rounded font-bold"
+                      >
+                          Got it!
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden relative z-20">
