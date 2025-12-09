@@ -4,6 +4,8 @@ A relaxing, feature-rich pixel art farming simulator built with **React**, **Typ
 
 Inspired by classics like *Stardew Valley* and *Hay Day*, this game features a complex economy, land expansion mechanics, dynamic weather systems, and an offline progression system.
 
+Try this demo on: https://yujingyao.com/games/pixel-farm/
+
 ## ✨ Key Features
 
 ### 🌾 Farming & Crops
