@@ -1,7 +1,8 @@
 
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { GameState, ItemType, GRID_SIZE, Plot, Order, MascotType, TOTAL_PLOTS } from './types';
-import { INITIAL_GAME_STATE, LEVEL_XP } from './constants';
+import { GameState, ItemType, GRID_SIZE, Plot, Order, MascotType, TOTAL_PLOTS, WeatherType } from './types';
+import { INITIAL_GAME_STATE, LEVEL_XP, EXPANSION_COSTS } from './constants';
 import { ITEMS } from './items';
 import { RECIPES } from './recipes';
 import { MASCOTS } from './mascots';
@@ -13,7 +14,10 @@ import {
   getAdjustedGrowthTime,
   getAdjustedCraftTime,
   getAdjustedXp,
-  getAdjustedOrderMoney
+  getAdjustedOrderMoney,
+  getNextWeather,
+  getPlotTier,
+  getTierYieldMultiplier
 } from './services/gameService';
 import { Tooltip } from './components/Tooltip';
 
@@ -21,9 +25,18 @@ import { Tooltip } from './components/Tooltip';
 const CoinIcon = () => <span className="text-yellow-400 font-bold">G</span>;
 const XpIcon = () => <span className="text-blue-400 font-bold">XP</span>;
 
+// Ambient System Types
+type AmbientEntity = {
+  id: number;
+  type: 'BUTTERFLY' | 'DOG' | 'FLOWER';
+  x: number; // Percentage 0-100
+  y: number; // Percentage 0-100
+  createdAt: number;
+};
+
 export default function App() {
   const [gameState, setGameState] = useState<GameState>(() => {
-     return { ...INITIAL_GAME_STATE, plots: initializePlots() };
+     return { ...INITIAL_GAME_STATE, plots: initializePlots(0) };
   });
   
   const [selectedTool, setSelectedTool] = useState<ItemType | 'HARVEST' | null>(null);
@@ -31,49 +44,96 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'INVENTORY' | 'CRAFTING' | 'ORDERS' | 'MASCOTS'>('INVENTORY');
   const [now, setNow] = useState(Date.now());
   const [isDragging, setIsDragging] = useState(false);
+  const [ambientEntities, setAmbientEntities] = useState<AmbientEntity[]>([]);
 
   // Game Loop
   useEffect(() => {
     const interval = setInterval(() => {
-      setNow(Date.now());
+      const currentTime = Date.now();
+      setNow(currentTime);
       
-      // Randomly generate orders if we have fewer than 3
+      // Order Logic
       setGameState(prev => {
-        if (prev.orders.length < 3 && Math.random() < 0.05) { // Small chance every second
-             const newOrder = generateNewOrder(prev.level, prev.orders);
-             return { ...prev, orders: [...prev.orders, newOrder] };
+        let nextState = { ...prev };
+
+        // 1. Check Weather
+        if (currentTime > prev.weatherEndTime) {
+            const nextW = getNextWeather();
+            nextState.weather = nextW.type;
+            nextState.weatherEndTime = currentTime + nextW.duration;
         }
-        return prev;
+
+        // 2. Check Orders
+        const validOrders = prev.orders.filter(o => o.expiresAt > currentTime);
+        const hasExpired = validOrders.length !== prev.orders.length;
+
+        if (validOrders.length < 3 && Math.random() < 0.05) { 
+             const newOrder = generateNewOrder(prev.level, validOrders);
+             nextState.orders = [...validOrders, newOrder];
+        } else if (hasExpired) {
+             nextState.orders = validOrders;
+        }
+
+        return nextState;
       });
+
+      // Ambient Life Spawning
+      if (Math.random() < 0.03) { // 3% chance per second
+        const typeRoll = Math.random();
+        let type: AmbientEntity['type'] = 'BUTTERFLY';
+        if (typeRoll > 0.6) type = 'FLOWER';
+        if (typeRoll > 0.95) type = 'DOG';
+
+        const newEntity: AmbientEntity = {
+            id: currentTime,
+            type,
+            x: Math.random() * 90, // Keep away from edges
+            y: Math.random() * 90,
+            createdAt: currentTime
+        };
+        setAmbientEntities(prev => [...prev, newEntity]);
+      }
+
+      // Cleanup Ambient Life
+      setAmbientEntities(prev => prev.filter(e => {
+          const age = currentTime - e.createdAt;
+          if (e.type === 'DOG') return age < 8000; // Dog runs away
+          if (e.type === 'FLOWER') return age < 15000; // Flower wilts
+          return age < 10000; // Butterflies fly away
+      }));
 
     }, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // Global mouse up to stop dragging
+  // Effect to notify weather changes
+  const prevWeatherRef = useRef(gameState.weather);
+  useEffect(() => {
+    if (prevWeatherRef.current !== gameState.weather) {
+      notify(`Weather changed to ${gameState.weather}!`);
+      prevWeatherRef.current = gameState.weather;
+    }
+  }, [gameState.weather]);
+
+  // Global mouse up
   useEffect(() => {
     const handleGlobalMouseUp = () => setIsDragging(false);
     window.addEventListener('mouseup', handleGlobalMouseUp);
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
   }, []);
 
-  // Notifications helper
   const notify = useCallback((text: string) => {
     const id = Date.now() + Math.random();
     setNotifications(prev => {
-      // Limit to 5 notifications
       const newList = [...prev, { id, text }];
-      if (newList.length > 5) {
-        return newList.slice(newList.length - 5);
-      }
+      if (newList.length > 5) return newList.slice(newList.length - 5);
       return newList;
     });
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
-    }, 5000); // 5 seconds
+    }, 5000); 
   }, []);
 
-  // Helper to check if a crop can be planted at a specific index
   const canPlantAt = (index: number, width: number, height: number, plots: Plot[]) => {
       const startRow = Math.floor(index / GRID_SIZE);
       const startCol = index % GRID_SIZE;
@@ -84,7 +144,10 @@ export default function App() {
       for (let r = 0; r < height; r++) {
           for (let c = 0; c < width; c++) {
               const targetIdx = index + (r * GRID_SIZE) + c;
-              if (plots[targetIdx].plantedCrop || plots[targetIdx].occupiedBy !== null) {
+              if (targetIdx >= plots.length) return false;
+              // Must be empty, no crop, and unlocked
+              const p = plots[targetIdx];
+              if (p.plantedCrop || p.occupiedBy !== null || !p.isUnlocked) {
                   return false;
               }
           }
@@ -92,53 +155,60 @@ export default function App() {
       return true;
   };
 
-  // Actions
   const handlePlotInteraction = (plotIndex: number) => {
     const plot = gameState.plots[plotIndex];
+    if (!plot.isUnlocked) {
+        if (!isDragging) notify(`Land locked! Buy expansion to unlock Tier ${plot.tier} land.`);
+        return;
+    }
+
     const currentTime = Date.now();
 
-    // HANDLE OCCUPIED PLOTS (Redirect to root)
     if (plot.occupiedBy !== null) {
-        // If simply clicking, redirect. If dragging, we might want to ignore sub-plots to prevent double triggers?
-        // Actually, redirecting is fine for harvest, but for planting we shouldn't be here anyway.
         handlePlotInteraction(plot.occupiedBy);
         return;
     }
 
     // HARVEST
     if (plot.plantedCrop && plot.plantTime) {
-       // Only harvest if tool is harvest or null (click) - simplified: click always inspects/harvests
        const cropDef = ITEMS[plot.plantedCrop];
        const duration = getAdjustedGrowthTime(plot.plantedCrop, gameState.activeMascot);
 
        if ((currentTime - plot.plantTime >= duration)) {
-         // Harvest successful
          const baseXp = cropDef.xpReward || 0;
          const finalXp = getAdjustedXp(baseXp, gameState.activeMascot);
          
          setGameState(prev => {
             const newInventory = { ...prev.inventory };
             
-            // Calculate Yield (Cow Buff)
+            // YIELD CALCULATION
             let yieldCount = 1;
+            // 1. Tier Bonus
+            const tierMult = getTierYieldMultiplier(plot.tier);
+            // Base yield is 1, multiplied by tier, floor it, then add probability for remainder?
+            // Simple approach: Guaranteed yield * multiplier. Round randomly.
+            const calculatedYield = 1 * tierMult;
+            yieldCount = Math.floor(calculatedYield);
+            if (Math.random() < (calculatedYield - yieldCount)) {
+                yieldCount += 1;
+            }
+
+            // 2. Cow Bonus
             if (prev.activeMascot === MascotType.COW && Math.random() < 0.15) {
-                yieldCount = 2;
+                yieldCount *= 2;
                 notify("Lucky Cow! Double Harvest! 🐮");
             }
 
             newInventory[plot.plantedCrop!] = (newInventory[plot.plantedCrop!] || 0) + yieldCount;
             
             const newPlots = [...prev.plots];
-            
-            // Clear root plot
             newPlots[plotIndex] = { ...plot, plantedCrop: null, plantTime: null, occupiedBy: null };
             
-            // Clear occupied plots
             const w = cropDef.width || 1;
             const h = cropDef.height || 1;
             for (let r = 0; r < h; r++) {
                 for (let c = 0; c < w; c++) {
-                    if (r === 0 && c === 0) continue; // Skip root
+                    if (r === 0 && c === 0) continue; 
                     const targetIdx = plotIndex + (r * GRID_SIZE) + c;
                     if (targetIdx < TOTAL_PLOTS) {
                         newPlots[targetIdx] = { ...newPlots[targetIdx], occupiedBy: null, plantedCrop: null };
@@ -148,7 +218,6 @@ export default function App() {
             
             const newXp = prev.xp + finalXp;
             const newLevel = getLevelFromXp(newXp);
-            
             if (newLevel > prev.level) notify(`Level Up! You are now level ${newLevel}`);
 
             return {
@@ -163,7 +232,6 @@ export default function App() {
          notify(`Harvested ${cropDef.name} (+${finalXp} XP)`);
          return;
        } else {
-         // Only notify "Not ready" on explicit click, not drag
          if (!isDragging) notify("Not ready yet!");
          return;
        }
@@ -178,7 +246,7 @@ export default function App() {
        const h = cropDef.height || 1;
 
        if (!canPlantAt(plotIndex, w, h, gameState.plots)) {
-           if (!isDragging) notify("Not enough space!");
+           if (!isDragging) notify("Cannot plant here (Space or Locked)");
            return;
        }
 
@@ -186,13 +254,11 @@ export default function App() {
        
        if (gameState.money >= cost) {
          setGameState(prev => {
-           // Double check availability inside state update to prevent race conditions during drag
            if (prev.money < cost) return prev; 
            if (!canPlantAt(plotIndex, w, h, prev.plots)) return prev;
 
            const newPlots = [...prev.plots];
            
-           // Set Root
            newPlots[plotIndex] = {
              ...plot,
              plantedCrop: selectedTool,
@@ -201,7 +267,6 @@ export default function App() {
              occupiedBy: null
            };
 
-           // Set Occupied
            for (let r = 0; r < h; r++) {
                for (let c = 0; c < w; c++) {
                    if (r === 0 && c === 0) continue; 
@@ -233,7 +298,6 @@ export default function App() {
         const earnedItems: Record<string, number> = {};
 
         prev.plots.forEach((plot, index) => {
-            // Only verify root plots that have crops
             if (plot.occupiedBy !== null) return;
             if (!plot.plantedCrop || !plot.plantTime) return;
 
@@ -247,18 +311,22 @@ export default function App() {
                 currentXp += cropXp;
                 earnedXp += cropXp;
 
-                // Yield Logic
                 let yieldCount = 1;
+                // Tier Yield
+                const tierMult = getTierYieldMultiplier(plot.tier);
+                const calculatedYield = 1 * tierMult;
+                yieldCount = Math.floor(calculatedYield);
+                if (Math.random() < (calculatedYield - yieldCount)) yieldCount += 1;
+
+                // Cow Bonus
                 if (prev.activeMascot === MascotType.COW && Math.random() < 0.15) {
-                    yieldCount = 2;
+                    yieldCount *= 2;
                 }
                 newInventory[plot.plantedCrop!] = (newInventory[plot.plantedCrop!] || 0) + yieldCount;
                 earnedItems[cropDef.name] = (earnedItems[cropDef.name] || 0) + yieldCount;
 
-                // Clear Plot
                 newPlots[index] = { ...plot, plantedCrop: null, plantTime: null, occupiedBy: null };
                 
-                // Clear occupied
                 const w = cropDef.width || 1;
                 const h = cropDef.height || 1;
                 for (let r = 0; r < h; r++) {
@@ -295,21 +363,47 @@ export default function App() {
     });
   };
 
+  const handleExpandLand = () => {
+      const nextLevel = gameState.expansionLevel + 1;
+      if (nextLevel >= EXPANSION_COSTS.length) {
+          notify("Max expansion reached!");
+          return;
+      }
+      const cost = EXPANSION_COSTS[nextLevel];
+
+      if (gameState.money >= cost) {
+          setGameState(prev => {
+              const nextLvl = prev.expansionLevel + 1;
+              const newPlots = prev.plots.map(p => ({
+                  ...p,
+                  isUnlocked: p.tier <= nextLvl
+              }));
+              
+              return {
+                  ...prev,
+                  money: prev.money - cost,
+                  expansionLevel: nextLvl,
+                  plots: newPlots
+              };
+          });
+          notify(`Land Expanded! (Level ${nextLevel})`);
+      } else {
+          notify(`Need ${cost}G to expand!`);
+      }
+  };
+
   const handleCraft = (recipeId: string) => {
     const recipe = RECIPES.find(r => r.id === recipeId);
     if (!recipe) return;
 
-    // Check ingredients
     const canCraft = recipe.inputs.every(input => (gameState.inventory[input.item] || 0) >= input.count);
     
     if (canCraft) {
       setGameState(prev => {
         const newInv = { ...prev.inventory };
-        // Remove ingredients
         recipe.inputs.forEach(input => {
           newInv[input.item] -= input.count;
         });
-        // Add output
         newInv[recipe.output] = (newInv[recipe.output] || 0) + 1;
         
         const xpReward = getAdjustedXp(recipe.xpReward, prev.activeMascot);
@@ -399,20 +493,69 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const loadedState = JSON.parse(e.target?.result as string);
-        // Validate basic structure
-        if (loadedState.money !== undefined && loadedState.plots) {
-          const { updatedState, messages } = calculateOfflineProgress(loadedState);
-          setGameState(updatedState);
-          messages.forEach(msg => notify(msg));
-        } else {
-          notify("Invalid save file");
+        const raw = JSON.parse(e.target?.result as string);
+        
+        // MIGRATION LOGIC: 12x12 -> 18x18
+        let newPlots = initializePlots(0);
+        let expansionLvl = raw.expansionLevel || 0;
+
+        if (Array.isArray(raw.plots) && raw.plots.length === 144) {
+            notify("Migrating old save (12x12) to new system (18x18)...");
+            // Old map is 12x12. New map center 12x12 is Tier 2.
+            // Indices for center 12x12 starts at (3,3) in 18x18.
+            expansionLvl = Math.max(expansionLvl, 2); // Unlock up to Tier 2
+            
+            // Re-init plots with unlocked level 2
+            newPlots = initializePlots(expansionLvl);
+            
+            // Map old plots
+            for(let r=0; r<12; r++) {
+                for(let c=0; c<12; c++) {
+                    const oldIdx = r*12 + c;
+                    const newR = r + 3;
+                    const newC = c + 3;
+                    const newIdx = newR * 18 + newC;
+                    
+                    const oldP = raw.plots[oldIdx];
+                    newPlots[newIdx] = {
+                        ...newPlots[newIdx],
+                        plantedCrop: oldP.plantedCrop,
+                        plantTime: oldP.plantTime,
+                        isWithered: oldP.isWithered,
+                        occupiedBy: oldP.occupiedBy !== null ? (Math.floor(oldP.occupiedBy/12)+3)*18 + (oldP.occupiedBy%12+3) : null
+                    };
+                }
+            }
+        } else if (Array.isArray(raw.plots) && raw.plots.length === TOTAL_PLOTS) {
+            // Already new format
+            newPlots = raw.plots;
         }
+
+        const safeState: GameState = {
+            ...INITIAL_GAME_STATE,
+            ...raw,
+            plots: newPlots,
+            expansionLevel: expansionLvl,
+            inventory: raw.inventory || {},
+            orders: raw.orders || [],
+            ownedMascots: raw.ownedMascots || [],
+            unlockedItems: raw.unlockedItems || [ItemType.WHEAT],
+            weather: raw.weather || WeatherType.SUNNY,
+            weatherEndTime: raw.weatherEndTime || Date.now() + 60000
+        };
+
+        const { updatedState, messages } = calculateOfflineProgress(safeState);
+        setGameState(updatedState);
+        messages.forEach(msg => notify(msg));
+        notify("Game Loaded Successfully!");
+        
       } catch (err) {
+        console.error(err);
         notify("Failed to load save");
       }
     };
     reader.readAsText(file);
+    event.target.value = '';
   };
 
   const buyMascot = (mascotId: MascotType) => {
@@ -422,7 +565,7 @@ export default function App() {
             ...prev,
             money: prev.money - mascot.price,
             ownedMascots: [...prev.ownedMascots, mascotId],
-            activeMascot: prev.activeMascot || mascotId // Auto equip if none
+            activeMascot: prev.activeMascot || mascotId 
         }));
         notify(`You adopted the ${mascot.name}!`);
     } else {
@@ -441,7 +584,6 @@ export default function App() {
   // --- RENDER HELPERS ---
 
   const getCropColor = (itemType: ItemType) => {
-    // Simple color mapping for variety
     if (itemType.includes('WHEAT')) return 'bg-yellow-200';
     if (itemType.includes('CORN')) return 'bg-yellow-500';
     if (itemType.includes('CARROT')) return 'bg-orange-500';
@@ -455,20 +597,87 @@ export default function App() {
     return 'bg-green-600';
   };
 
+  const getSoilColor = (tier: number, isUnlocked: boolean) => {
+      if (!isUnlocked) return 'bg-stone-900 border-stone-800 opacity-80'; // Locked look
+      switch(tier) {
+          case 0: return 'bg-[#795548] border-[#5d4037]'; // Standard
+          case 1: return 'bg-[#6d4c41] border-[#4e342e]'; 
+          case 2: return 'bg-[#5d4037] border-[#3e2723]';
+          case 3: return 'bg-[#4e342e] border-[#3e2723]';
+          case 4: return 'bg-[#3e2723] border-[#251815]';
+          case 5: return 'bg-[#281a17] border-black'; // Richest
+          default: return 'bg-[#795548]';
+      }
+  };
+
+  // Styles for weather effects
+  const getWeatherOverlay = () => {
+    switch (gameState.weather) {
+        case WeatherType.RAINY:
+            return (
+                <div className="absolute inset-0 pointer-events-none z-30 opacity-40 mix-blend-overlay flex overflow-hidden">
+                    <style>{`
+                        @keyframes rain { 0% { background-position: 0% 0%; } 100% { background-position: 20% 100%; } }
+                        .rain-layer {
+                            width: 100%; height: 100%;
+                            background-image: linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,0.4) 50%, rgba(255,255,255,0) 100%);
+                            background-size: 2px 30px;
+                            animation: rain 0.5s linear infinite;
+                        }
+                    `}</style>
+                    <div className="rain-layer"></div>
+                </div>
+            );
+        case WeatherType.SNOWY:
+            return (
+                <div className="absolute inset-0 pointer-events-none z-30 opacity-60">
+                     <style>{`
+                        @keyframes snow { 0% { transform: translateY(-100%); } 100% { transform: translateY(100vh); } }
+                        .snowflake { position: absolute; background: white; border-radius: 50%; width: 4px; height: 4px; animation: snow linear infinite; }
+                     `}</style>
+                     {Array.from({length: 20}).map((_, i) => (
+                         <div key={i} className="snowflake" style={{ 
+                             left: `${Math.random()*100}%`, 
+                             animationDuration: `${Math.random()*5+5}s`,
+                             animationDelay: `${Math.random()*5}s`,
+                             opacity: Math.random()
+                         }}></div>
+                     ))}
+                     <div className="absolute inset-0 bg-white/10 mix-blend-soft-light"></div>
+                </div>
+            );
+        case WeatherType.CLOUDY:
+            return <div className="absolute inset-0 pointer-events-none z-30 bg-black/20 mix-blend-multiply transition-colors duration-1000"></div>;
+        case WeatherType.WINDY:
+             return <div className="absolute inset-0 pointer-events-none z-30 bg-yellow-900/5 mix-blend-overlay"></div>;
+        default:
+            return null; // Sunny
+    }
+  };
+
+  const getWeatherIcon = () => {
+      switch(gameState.weather) {
+          case WeatherType.SUNNY: return '☀️';
+          case WeatherType.RAINY: return '🌧️';
+          case WeatherType.CLOUDY: return '☁️';
+          case WeatherType.SNOWY: return '❄️';
+          case WeatherType.WINDY: return '🍃';
+      }
+  };
+
   const renderGrid = () => {
     return (
       <div 
-        className="grid gap-1 bg-stone-800 p-2 rounded border-4 border-stone-700 shadow-2xl relative z-10 select-none"
+        className="grid gap-0.5 bg-stone-950 p-2 rounded shadow-2xl relative z-10 select-none"
         style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, minmax(0, 1fr))` }}
         onMouseLeave={() => setIsDragging(false)}
       >
         {gameState.plots.map((plot, index) => {
-          // If this plot is merely occupied by another crop, render a placeholder (or nothing visible)
           if (plot.occupiedBy !== null) {
               return (
                  <div 
                     key={plot.id} 
-                    className="w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 bg-[#5d4037]/50"
+                    className={`w-6 h-6 sm:w-8 sm:h-8 ${getSoilColor(plot.tier, plot.isUnlocked)}`}
                     onMouseEnter={() => { if (isDragging) handlePlotInteraction(index); }}
                     onMouseDown={() => { setIsDragging(true); handlePlotInteraction(index); }}
                  />
@@ -480,50 +689,50 @@ export default function App() {
           let isReady = false;
           let cropStyle = {};
 
-          if (plot.plantedCrop && plot.plantTime) {
+          if (plot.isUnlocked && plot.plantedCrop && plot.plantTime) {
              const def = ITEMS[plot.plantedCrop];
              const elapsed = now - plot.plantTime;
-             const duration = getAdjustedGrowthTime(plot.plantedCrop, gameState.activeMascot); // Apply Buff
+             const duration = getAdjustedGrowthTime(plot.plantedCrop, gameState.activeMascot); 
              progress = Math.min(100, (elapsed / duration) * 100);
              isReady = progress >= 100;
 
-             // Multi-tile sizing logic
              const widthMult = def.width || 1;
              const heightMult = def.height || 1;
              
-             // Dynamic style for multi-tile
              if (widthMult > 1 || heightMult > 1) {
                  cropStyle = {
-                     width: `calc(${widthMult * 100}% + ${(widthMult - 1) * 0.25}rem)`,
-                     height: `calc(${heightMult * 100}% + ${(heightMult - 1) * 0.25}rem)`,
+                     width: `calc(${widthMult * 100}% + ${(widthMult - 1) * 0.125}rem)`,
+                     height: `calc(${heightMult * 100}% + ${(heightMult - 1) * 0.125}rem)`,
                      zIndex: 20
                  };
              }
              
+             const swayClass = (gameState.weather === WeatherType.WINDY || gameState.weather === WeatherType.RAINY) 
+                ? 'animate-[wiggle_1s_ease-in-out_infinite]' 
+                : '';
+             
              content = (
                <div 
-                 className={`absolute top-0 left-0 transition-all ${isReady ? 'animate-bounce' : ''} pointer-events-none`}
+                 className={`absolute top-0 left-0 transition-all ${isReady ? 'animate-bounce' : swayClass} pointer-events-none`}
                  style={{ width: '100%', height: '100%', ...cropStyle }}
                >
-                 {/* Plant Graphic */}
+                 <style>{`
+                    @keyframes wiggle { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+                 `}</style>
                  <div className={`w-full h-full ${getCropColor(plot.plantedCrop)} rounded-sm shadow-inner relative border border-black/20 overflow-hidden`}>
                     {!isReady && (
                         <div className="absolute bottom-0 w-full bg-black/40 transition-all duration-500" style={{ height: `${100 - progress}%` }}></div>
                     )}
                     {isReady && (
                         <div className="absolute inset-0 flex items-center justify-center opacity-50">
-                            <span className="text-black text-xs font-bold opacity-50">^_^</span>
+                            <span className="text-black text-[8px] font-bold opacity-50">^_^</span>
                         </div>
                     )}
                  </div>
-                 {/* Hover Info */}
-                 {!isDragging && (
-                    <div className="hidden group-hover:flex absolute -top-8 left-1/2 -translate-x-1/2 bg-black text-white text-[10px] px-1 rounded whitespace-nowrap z-50">
-                        {def.name} {isReady ? '(Ready)' : `${Math.floor(progress)}%`}
-                    </div>
-                 )}
                </div>
              );
+          } else if (!plot.isUnlocked) {
+               content = <div className="w-full h-full flex items-center justify-center text-stone-700 text-[8px]">🔒</div>;
           }
 
           return (
@@ -532,9 +741,10 @@ export default function App() {
               onMouseDown={() => { setIsDragging(true); handlePlotInteraction(index); }}
               onMouseEnter={() => { if (isDragging) handlePlotInteraction(index); }}
               className={`
-                w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 
-                bg-[#5d4037] border border-[#3e2723] 
-                hover:border-yellow-400 cursor-pointer 
+                w-6 h-6 sm:w-8 sm:h-8
+                border 
+                ${getSoilColor(plot.tier, plot.isUnlocked)}
+                ${plot.isUnlocked ? 'hover:border-yellow-400 cursor-pointer' : 'cursor-not-allowed'}
                 relative
                 group
               `}
@@ -548,7 +758,7 @@ export default function App() {
   };
 
   return (
-    <div className="h-screen w-screen bg-[#4a6741] flex flex-col font-mono text-stone-100 relative overflow-hidden">
+    <div className="h-screen w-screen bg-[#4a6741] flex flex-col font-mono text-stone-100 relative overflow-hidden transition-colors duration-1000">
       
       {/* Background Pattern */}
       <div 
@@ -557,7 +767,10 @@ export default function App() {
             backgroundImage: gameState.forestTexture ? `url(${gameState.forestTexture})` : 'none',
             backgroundSize: '128px 128px',
             backgroundRepeat: 'repeat',
-            filter: 'brightness(0.8)'
+            filter: gameState.weather === WeatherType.RAINY ? 'brightness(0.6) grayscale(0.3)' : 
+                    gameState.weather === WeatherType.CLOUDY ? 'brightness(0.8)' : 
+                    gameState.weather === WeatherType.SNOWY ? 'brightness(1.1) contrast(0.8)' : 
+                    'brightness(0.9)'
         }}
       >
         {!gameState.forestTexture && (
@@ -565,22 +778,76 @@ export default function App() {
         )}
       </div>
 
+      {/* Weather Overlay */}
+      {getWeatherOverlay()}
+
+      {/* Ambient Life Layer */}
+      <div className="absolute inset-0 pointer-events-none z-1 overflow-hidden">
+        {ambientEntities.map(entity => {
+            const age = now - entity.createdAt;
+            let transform = `translate(0,0)`;
+            let opacity = 1;
+            let icon = '';
+
+            if (entity.type === 'BUTTERFLY') {
+                icon = '🦋';
+                const xOffset = Math.sin(age / 500) * 50;
+                const yOffset = Math.cos(age / 700) * 50;
+                transform = `translate(${xOffset}px, ${yOffset}px)`;
+                if (age > 8000) opacity = 1 - ((age - 8000) / 2000); 
+            } else if (entity.type === 'DOG') {
+                icon = '🐕';
+                const progress = age / 8000;
+                const distance = 800; 
+                transform = `translateX(${progress * distance}px)`;
+                if (age > 7500) opacity = 0;
+            } else if (entity.type === 'FLOWER') {
+                icon = '🌻';
+                if (age < 1000) opacity = age / 1000;
+                if (age > 14000) opacity = 1 - ((age - 14000) / 1000);
+            }
+
+            return (
+                <div 
+                    key={entity.id}
+                    className="absolute transition-transform duration-75"
+                    style={{
+                        top: `${entity.y}%`,
+                        left: `${entity.x}%`,
+                        transform,
+                        opacity,
+                        fontSize: entity.type === 'DOG' ? '24px' : '16px'
+                    }}
+                >
+                    {icon}
+                </div>
+            );
+        })}
+      </div>
+
       {/* Top Bar */}
-      <div className="relative z-20 bg-stone-900/90 p-3 flex justify-between items-center shadow-lg border-b-4 border-stone-700">
+      <div className="relative z-40 bg-stone-900/90 p-3 flex justify-between items-center shadow-lg border-b-4 border-stone-700 h-20">
          <div className="flex gap-4 items-center">
              <div className="flex flex-col">
-                <h1 className="text-xl font-bold text-yellow-500 leading-none">Pixel Farm</h1>
-                <span className="text-xs text-stone-400">Level {gameState.level}</span>
+                <h1 className="text-xs text-stone-400 uppercase tracking-widest leading-none">Level</h1>
+                <span className="text-4xl font-bold text-yellow-500 leading-none">{gameState.level}</span>
              </div>
-             <div className="bg-stone-800 px-3 py-1 rounded flex gap-2 items-center border border-stone-600">
-                 <CoinIcon /> {gameState.money}
-             </div>
-             <div className="bg-stone-800 px-3 py-1 rounded flex gap-2 items-center border border-stone-600">
-                 <XpIcon /> {Math.floor(gameState.xp)} / {LEVEL_XP[gameState.level + 1] || 'MAX'}
+             
+             <div className="flex flex-col justify-center gap-1 h-full">
+                 <div className="bg-stone-800 px-3 py-1 rounded flex gap-2 items-center border border-stone-600 text-sm">
+                     <CoinIcon /> {gameState.money}
+                 </div>
+                 <div className="bg-stone-800 px-3 py-1 rounded flex gap-2 items-center border border-stone-600 text-sm">
+                     <XpIcon /> {Math.floor(gameState.xp)} / {LEVEL_XP[gameState.level + 1] || 'MAX'}
+                 </div>
              </div>
          </div>
+
+         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center opacity-80">
+            <span className="text-3xl animate-pulse">{getWeatherIcon()}</span>
+            <span className="text-[10px] uppercase text-stone-400 tracking-wider">{gameState.weather}</span>
+         </div>
          
-         {/* Active Mascot Display */}
          {gameState.activeMascot && (
              <div className="absolute top-3 right-4 flex items-center gap-2 bg-stone-800 px-3 py-1 rounded border border-yellow-500/50">
                  <span className="text-2xl" role="img" aria-label="mascot">{MASCOTS[gameState.activeMascot].icon}</span>
@@ -591,8 +858,7 @@ export default function App() {
              </div>
          )}
          
-         {/* Toast Notifications */}
-         <div className="absolute top-16 right-4 flex flex-col gap-1 pointer-events-none z-50 items-end">
+         <div className="absolute top-24 right-4 flex flex-col gap-1 pointer-events-none z-50 items-end">
             {notifications.map(n => (
                 <div key={n.id} className="bg-black/80 text-white px-3 py-1 rounded text-sm animate-fade-in-down border border-stone-500 shadow-lg">
                     {n.text}
@@ -602,10 +868,10 @@ export default function App() {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden relative z-10">
+      <div className="flex-1 flex overflow-hidden relative z-20">
         
         {/* Left: The Farm */}
-        <div className="flex-1 flex flex-col items-center justify-center p-4 overflow-auto relative">
+        <div className="flex-1 flex flex-col items-center justify-center p-4 overflow-auto relative custom-scrollbar">
             {renderGrid()}
             
             {/* Quick Actions Panel */}
@@ -618,11 +884,22 @@ export default function App() {
                         🧺 Harvest All
                     </button>
                  </Tooltip>
+                 
+                 {gameState.expansionLevel < 5 && (
+                    <Tooltip text={`Unlock next land tier (Yield Bonus +${((gameState.expansionLevel + 1) * 0.2 + 1).toFixed(1)}x)`}>
+                        <button 
+                            onClick={handleExpandLand}
+                            className="bg-green-700 hover:bg-green-600 text-white border-b-4 border-green-900 active:border-b-0 active:translate-y-1 px-4 py-2 rounded font-bold shadow-lg flex items-center gap-2"
+                        >
+                            🚧 Expand ({EXPANSION_COSTS[gameState.expansionLevel + 1]}G)
+                        </button>
+                    </Tooltip>
+                 )}
             </div>
         </div>
 
         {/* Right: UI Panel */}
-        <div className="w-80 sm:w-96 bg-stone-900/95 border-l-4 border-stone-700 flex flex-col shadow-2xl">
+        <div className="w-80 sm:w-96 bg-stone-900/95 border-l-4 border-stone-700 flex flex-col shadow-2xl relative z-40">
             {/* Tabs */}
             <div className="flex border-b border-stone-700">
                 {(['INVENTORY', 'CRAFTING', 'ORDERS', 'MASCOTS'] as const).map(tab => (
@@ -705,7 +982,6 @@ export default function App() {
                             </div>
                         </div>
                         
-                        {/* Import/Export moved here since Settings is gone */}
                         <div className="bg-stone-800 p-3 rounded border border-stone-600 mt-4">
                              <h3 className="text-stone-400 text-xs uppercase mb-2">System</h3>
                              <div className="grid grid-cols-2 gap-2">
@@ -752,11 +1028,6 @@ export default function App() {
                                 </div>
                             );
                         })}
-                        {RECIPES.filter(r => r.unlockLevel > gameState.level).length > 0 && (
-                            <div className="text-center text-xs text-stone-500 mt-4">
-                                Level up to unlock more recipes!
-                            </div>
-                        )}
                      </div>
                 )}
 
@@ -773,16 +1044,36 @@ export default function App() {
                              const canFulfill = order.items.every(req => (gameState.inventory[req.item] || 0) >= req.count);
                              const rewardMoney = getAdjustedOrderMoney(order.rewardMoney, gameState.activeMascot);
                              const rewardXp = getAdjustedXp(order.rewardXp, gameState.activeMascot);
+                             const timeLeft = Math.max(0, Math.ceil((order.expiresAt - now) / 1000));
                              
                              return (
-                                <div key={order.id} className="bg-stone-100 text-stone-900 p-3 rounded border-b-4 border-stone-300 relative">
-                                    {/* Paper Clip Visual */}
-                                    <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-8 h-2 bg-stone-400 rounded-full"></div>
+                                <div 
+                                    key={order.id} 
+                                    className={`
+                                        p-3 rounded border-b-4 relative transition-all
+                                        ${order.isEmergency 
+                                            ? 'bg-red-900/20 border-red-800 text-red-100 ring-1 ring-red-500' 
+                                            : 'bg-stone-100 text-stone-900 border-stone-300'
+                                        }
+                                    `}
+                                >
+                                    <div className={`absolute -top-2 left-1/2 -translate-x-1/2 w-8 h-2 rounded-full ${order.isEmergency ? 'bg-red-800' : 'bg-stone-400'}`}></div>
                                     
-                                    <h4 className="font-bold text-sm mb-2 uppercase tracking-wide">Market Order</h4>
+                                    <div className="flex justify-between items-start mb-2 border-b border-black/10 pb-1">
+                                        <div className="flex flex-col">
+                                            <span className={`text-xs font-bold uppercase ${order.isEmergency ? 'text-red-400' : 'text-stone-500'}`}>
+                                                {order.isEmergency ? '⚠ URGENT REQUEST' : 'Market Order'}
+                                            </span>
+                                            <span className="font-bold text-sm">{order.requesterName}</span>
+                                        </div>
+                                        <span className="text-xs font-mono">{Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}</span>
+                                    </div>
+
+                                    <p className="text-xs italic opacity-80 mb-3">"{order.requesterQuote}"</p>
+
                                     <div className="space-y-1 mb-3">
                                         {order.items.map((req, i) => (
-                                            <div key={i} className="flex justify-between text-sm border-b border-stone-200 pb-1">
+                                            <div key={i} className="flex justify-between text-sm border-b border-black/5 pb-1">
                                                 <span>{ITEMS[req.item].name} x{req.count}</span>
                                                 <span className={(gameState.inventory[req.item] || 0) >= req.count ? 'text-green-600 font-bold' : 'text-red-500'}>
                                                     Have: {gameState.inventory[req.item] || 0}
@@ -790,7 +1081,7 @@ export default function App() {
                                             </div>
                                         ))}
                                     </div>
-                                    <div className="flex justify-between items-center bg-stone-200 p-2 rounded mb-2">
+                                    <div className="flex justify-between items-center bg-black/10 p-2 rounded mb-2">
                                         <span className="font-bold text-yellow-700">{rewardMoney} G</span>
                                         <span className="font-bold text-blue-700">{rewardXp} XP</span>
                                     </div>

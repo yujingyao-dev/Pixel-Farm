@@ -57,6 +57,14 @@ export enum MascotType {
   OWL = 'OWL'
 }
 
+export enum WeatherType {
+  SUNNY = 'SUNNY',
+  CLOUDY = 'CLOUDY',
+  RAINY = 'RAINY',
+  SNOWY = 'SNOWY',
+  WINDY = 'WINDY'
+}
+
 export interface MascotDef {
   id: MascotType;
   name: string;
@@ -95,6 +103,9 @@ export interface Plot {
   plantTime: number | null; // Timestamp when planted
   isWithered: boolean;
   occupiedBy: number | null; // If this plot is part of a larger crop, this points to the root plot ID
+  // Land expansion properties
+  tier: number; // 0 to 5. Higher tier = better yield.
+  isUnlocked: boolean;
 }
 
 export interface Order {
@@ -103,6 +114,9 @@ export interface Order {
   rewardMoney: number;
   rewardXp: number;
   expiresAt: number;
+  requesterName: string;
+  requesterQuote: string;
+  isEmergency: boolean;
 }
 
 export interface GameState {
@@ -110,14 +124,17 @@ export interface GameState {
   xp: number;
   level: number;
   inventory: Record<string, number>; // ItemType -> Count
-  plots: Plot[]; // 12x12 = 144 plots
+  plots: Plot[]; // 18x18 = 324 plots
   lastSaveTime: number;
   unlockedItems: ItemType[];
   orders: Order[];
   forestTexture: string | null;
   ownedMascots: MascotType[];
   activeMascot: MascotType | null;
+  weather: WeatherType;
+  weatherEndTime: number;
+  expansionLevel: number; // 0 (8x8) to 5 (18x18)
 }
 
-export const GRID_SIZE = 12;
+export const GRID_SIZE = 18; // Max grid size
 export const TOTAL_PLOTS = GRID_SIZE * GRID_SIZE;
